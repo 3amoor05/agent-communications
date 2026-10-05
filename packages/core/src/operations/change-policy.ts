@@ -1,5 +1,4 @@
 import type { GatedChange } from '../change-flow.ts';
-import { commandText, shellCommand } from '../cli-runtime.ts';
 import {
   type AccountConfig,
   type ChangePolicy,
@@ -9,6 +8,7 @@ import {
 } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
+import { asHandoffMaker, type HandoffMaker, type HandoffsOrPlatform, handoffsFor, handoffText } from '../handoffs.ts';
 import { resolveName } from '../names.ts';
 
 /**
@@ -39,7 +39,10 @@ export interface PolicyOverride {
 export interface LooserOverride extends PolicyOverride {
   changePolicy: 'chat';
   tighten: {
-    /** At a terminal. */
+    /**
+     * At a terminal: the command's line — or, when no line is safe in every Windows shell, its words with what to do —
+     * or, with no command here, the sentence saying why (`handoffText`).
+     */
     command: string;
     /** From a chat: this tool, with these arguments. */
     tool: 'comms_change_policy';
@@ -98,7 +101,7 @@ function resolveScope(
 export function changePolicyReport(
   config: Config,
   scope: PolicyScope = {},
-  platform: NodeJS.Platform = process.platform,
+  handoffs: HandoffsOrPlatform = process.platform,
 ): ChangePolicyReport {
   const target = resolveScope(config, scope);
   if (target === null) {
@@ -111,7 +114,8 @@ export function changePolicyReport(
       ),
     ];
     const changePolicy = defaultChangePolicy(config);
-    const looser = changePolicy === 'confirm' ? overrides.flatMap((override) => stillChat(override, platform)) : [];
+    const looser =
+      changePolicy === 'confirm' ? overrides.flatMap((override) => stillChat(override, asHandoffMaker(handoffs))) : [];
     return {
       scope: 'defaults',
       name: null,
@@ -131,7 +135,7 @@ export function changePolicyReport(
 }
 
 /** An override that approves in chat, with how to tighten it; nothing for one that does not. */
-function stillChat(override: PolicyOverride, platform: NodeJS.Platform): LooserOverride[] {
+function stillChat(override: PolicyOverride, handoffs: HandoffMaker): LooserOverride[] {
   if (override.changePolicy !== 'chat') return [];
   // Names are held to a grammar of letters, digits, `-` and `/`, so they go into a command line as they are.
   const flag = override.kind === 'inbox' ? '--inbox' : '--account';
@@ -141,7 +145,8 @@ function stillChat(override: PolicyOverride, platform: NodeJS.Platform): LooserO
       name: override.name,
       changePolicy: 'chat',
       tighten: {
-        command: commandText(shellCommand(['agentcomms', 'policy', flag, override.name, 'confirm'], platform)),
+        // Core's own, located from whatever is printing (CUE-403): its line, or why there is none here.
+        command: handoffText(handoffs.core(['policy', flag, override.name, 'confirm'])),
         tool: 'comms_change_policy',
         arguments:
           override.kind === 'inbox'
@@ -197,9 +202,10 @@ export function changePolicyChange(
   if (!isChangePolicy(to)) {
     throw new CommsError('USAGE', `"${String(to)}" is not a change policy`, { hint: 'Use `chat` or `confirm`.' });
   }
+  const handoffs = handoffsFor(core, { platform });
   return {
     plan: (config) => {
-      const before = changePolicyReport(config, scope, platform);
+      const before = changePolicyReport(config, scope, handoffs);
       const where = before.name === null ? 'the default change policy' : `the change policy of ${before.name}`;
       return {
         ...(before.scope === 'inbox' ? { inbox: before.name ?? undefined } : {}),
@@ -211,7 +217,7 @@ export function changePolicyChange(
     },
     apply: async (consent) => {
       const written = await core.config.update((config) => withPolicy(config, scope, to), consent ? { consent } : {});
-      return changePolicyReport(written, scope, platform);
+      return changePolicyReport(written, scope, handoffs);
     },
   };
 }

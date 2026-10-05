@@ -1,10 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import type { GatedChange } from '../change-flow.ts';
 import type { ChangeSurface } from '../changes.ts';
-import { inlineCommand, shellCommand } from '../cli-runtime.ts';
 import { type Config, classifyChange, type LooseningConsent, secretsStoreOf } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
+import { handoffSentence, handoffsFor } from '../handoffs.ts';
 import { APPROVAL_KEY_REF } from '../keys.ts';
 import { withCredentialsLock } from '../lock.ts';
 import { keychainNamespace, openSecretStore, type SecretStore, type SecretStoreKind } from '../secrets.ts';
@@ -232,6 +232,8 @@ async function migrateUnderLock(
   const from = secretsStoreOf(config);
   if (from === to) return { from, to, moved: 0, leftovers: [] };
   const plan = physicalMigrationPlan(config, to);
+  // The migration again, as a command: core's own, located from whatever is printing (CUE-403).
+  const again = handoffsFor(core, { platform }).core(['secrets', 'migrate', '--to', to]);
   /*
    * Consent is checked again here, under the lock, before any store is opened.
    *
@@ -247,7 +249,11 @@ async function migrateUnderLock(
       'LOOSENING_REFUSED',
       'moving credentials out of the system keychain needs a person to approve it',
       {
-        hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', to], platform))}, or call comms_secrets_migrate, and approve the change it shows.`,
+        hint: handoffSentence(
+          again,
+          (command) => `Run ${command}, or call comms_secrets_migrate, and approve the change it shows.`,
+          { instead: 'Call comms_secrets_migrate from a chat, and approve the change it shows.' },
+        ),
       },
     );
   }
@@ -262,6 +268,7 @@ async function migrateUnderLock(
       // deleted the originals, and left the runtime — which reads `paths.secretsDir` — finding nothing at all.
       secretsDir: core.paths.secretsDir,
       namespace: keychainNamespace(core.paths.configDir),
+      handoffs: core.handoffs,
     }));
   const attemptedTargets: SecretLocation[] = [];
   const sourceCleanup: SecretLocation[] = [];
@@ -373,7 +380,11 @@ async function migrateUnderLock(
       throw new CommsError(base.code, base.message, {
         hint:
           `${base.hint ? `${base.hint} ` : ''}Whether the backend was switched could not be confirmed, so nothing ` +
-          `was deleted from either. Run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', to], platform))} again once the configuration is readable.`,
+          `was deleted from either. ${handoffSentence(
+            again,
+            (command) => `Run ${command} again once the configuration is readable.`,
+            { instead: 'Call comms_secrets_migrate again once the configuration is readable.' },
+          )}`,
         details: {
           unconfirmed: true,
           copiedToTarget: attemptedTargets.map((location) => ({ backend: location.store, ref: location.ref })),

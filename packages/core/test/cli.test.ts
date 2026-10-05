@@ -557,6 +557,44 @@ test('a mixed migration copies source bundles, verifies target bundles in place,
   );
 });
 
+test('moving credentials out of the keychain unapproved is refused, naming core’s own migrate command, located (7d-core)', async () => {
+  const { migrateSecrets } = await import('../src/operations/secrets-migrate.ts');
+  const { openCore } = await import('../src/core.ts');
+  const { CORE_CALLER } = await import('../src/handoffs.ts');
+  const dir = tempDir();
+  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir }, caller: CORE_CALLER });
+  await core.config.update((config) => ({
+    ...config,
+    secrets: { store: 'keychain' },
+    accounts: {
+      'acme/slack': {
+        id: 'acc_AAAAAAAAAAAAAAAA',
+        platform: 'slack',
+        workspace: 'T1',
+        userId: 'U1',
+        tier: 'read',
+        grantedScopes: [],
+        secretRef: ROOT_REF,
+        createdAt: NOW,
+      },
+    },
+  }));
+  const source = memoryStore('keychain');
+  source.values.set(ROOT_REF, 'current-token');
+  const target = memoryStore('file');
+  await assert.rejects(
+    migrateSecrets(core, 'file', { source: source.store, target: target.store }),
+    (error: unknown) => {
+      assert.ok(error instanceof CommsError && error.code === 'LOOSENING_REFUSED', String(error));
+      const migrate = coreCommand(core.paths, ['secrets', 'migrate', '--to', 'file']);
+      assert.equal(error.hint, `Run \`${migrate}\`, or call comms_secrets_migrate, and approve the change it shows.`);
+      assertNoBareCommand(error.hint ?? '');
+      return true;
+    },
+  );
+  assert.deepEqual(target.calls.set, [], 'nothing was copied');
+});
+
 test('a missing or unreadable in-place pending bundle aborts before any copy or cleanup', async () => {
   const { migrateSecrets } = await import('../src/operations/secrets-migrate.ts');
   for (const unreadable of [false, true]) {

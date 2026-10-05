@@ -15,7 +15,7 @@ import {
 import {
   accountNoun,
   channelApproveCommands,
-  connectMailboxCommand,
+  connectMailboxWords,
   hasNarrowing,
   listed,
   narrowingOwner,
@@ -145,7 +145,7 @@ test('what the core says about a channel is read from its manifest', () => {
     channelApproveCommands({ sending: true }),
     '`agent-gmail approve`, `agent-resend approve` or `agent-slack approve`',
   );
-  assert.equal(connectMailboxCommand(), 'agent-gmail inbox add');
+  assert.equal(connectMailboxWords(), "Gmail's inbox add", 'in words: core has not got Gmail to name its command');
   assert.equal(listed([], 'or'), '');
   assert.equal(listed(['a'], 'or'), 'a');
   assert.equal(listed(['a', 'b'], 'or'), 'a or b');

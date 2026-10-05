@@ -5,6 +5,7 @@ import type { ChangeSurface } from '../changes.ts';
 import { type Config, comparablePath, isInsideDirectory } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
+import { type HandoffMaker, handoffSentence, handoffSentenceToFill, handoffsFor } from '../handoffs.ts';
 import { defaultAttachDeny, namesItsPlace } from '../jail.ts';
 import { expandHome, homeDirectory } from '../paths.ts';
 
@@ -94,14 +95,16 @@ export function attachChange(
     });
   }
   const removing = change.kind === 'rootsRemove' || change.kind === 'denyRemove';
-  const path = removing ? listedPath(change.path) : checkedPath(change.path);
+  // Core's own commands, located from whatever is printing (CUE-403), for what a refusal or a note names.
+  const handoffs = handoffsFor(core);
+  const path = removing ? listedPath(change.path, handoffs) : checkedPath(change.path, process.platform, handoffs);
   const { kind } = change;
   const home = homeDirectory(env);
   const edit = editOf(kind, path, home);
   let planned: { changes: boolean; note: string | null } | null = null;
   return {
     plan: async (config) => {
-      const outcome = await planChange(config, kind, path, { core, env, home });
+      const outcome = await planChange(config, kind, path, { core, env, home, handoffs });
       planned = { changes: outcome.changes, note: outcome.note };
       return {
         before: config,
@@ -162,20 +165,35 @@ const AUDIT_OPERATIONS: Readonly<Record<AttachChangeKind, string>> = {
   denyRemove: 'attach.deny.remove',
 };
 
-/** The command that allows another folder, as every refusal and every document names it. */
-export const ATTACH_ROOTS_ADD = 'agentcomms attach roots add <folder>';
+/** "`attach` lists them": core's command that shows the lists, located — or the tool that shows them from a chat. */
+function listsThem(handoffs: HandoffMaker, what: string): string {
+  return handoffSentence(handoffs.core(['attach']), (command) => `${command} lists ${what}.`, {
+    instead: `comms_attach, from a chat, lists ${what}.`,
+  });
+}
 
 /**
  * The path as written, refused unless it says where it is on its own: absolute, or from the home folder. A relative
  * path means whatever folder the command or the server happened to start in, which is not something a person reads
  * in a preview and knows.
+ *
+ * `platform` is the system the path is read on; `handoffs` make the command a refusal gives as its example (CUE-403),
+ * the bridge's bare one when left out.
  */
-export function checkedPath(path: unknown, platform: NodeJS.Platform = process.platform): string {
+export function checkedPath(
+  path: unknown,
+  platform: NodeJS.Platform = process.platform,
+  handoffs: HandoffMaker = handoffsFor(undefined, { platform }),
+): string {
   // Not trimmed: a space at the end is part of a folder's name on macOS and Linux, and `/outgoing ` is not `/outgoing`.
   const value = typeof path === 'string' ? path : '';
   if (value.trim() === '') {
     throw new CommsError('USAGE', 'name the folder or path', {
-      hint: `For example: \`${ATTACH_ROOTS_ADD.replace('<folder>', '~/Documents/outgoing')}\`.`,
+      hint: handoffSentence(
+        handoffs.core(['attach', 'roots', 'add', '~/Documents/outgoing']),
+        (command) => `For example: ${command}.`,
+        { instead: 'For example: ~/Documents/outgoing, as comms_attach takes it from a chat.' },
+      ),
     });
   }
   // The jail's own rule, so what this takes is what the jail allows (see `namesItsPlace`).
@@ -199,10 +217,12 @@ export function checkedPath(path: unknown, platform: NodeJS.Platform = process.p
  * place — `\outgoing` on Windows — and the one way to be rid of it must not be to edit the file again. An entry that is
  * not listed is refused when the change is planned.
  */
-function listedPath(path: unknown): string {
+function listedPath(path: unknown, handoffs: HandoffMaker): string {
   // Not trimmed: an entry written by hand may begin or end with a space, or be empty, and it is taken out as it is.
   if (typeof path !== 'string') {
-    throw new CommsError('USAGE', 'name the folder or path to take out, as `agentcomms attach` lists it');
+    throw new CommsError('USAGE', 'name the folder or path to take out, as it is listed', {
+      hint: listsThem(handoffs, 'them'),
+    });
   }
   return path;
 }
@@ -264,9 +284,9 @@ async function planChange(
   config: Config,
   kind: AttachChangeKind,
   path: string,
-  context: { core: Core; env: NodeJS.ProcessEnv; home: string },
+  context: { core: Core; env: NodeJS.ProcessEnv; home: string; handoffs: HandoffMaker },
 ): Promise<{ changes: boolean; effects: string[]; note: string | null }> {
-  const { home } = context;
+  const { home, handoffs } = context;
   const roots = config.defaults.attachRoots;
   const deny = config.defaults.attachDeny;
   switch (kind) {
@@ -301,16 +321,22 @@ async function planChange(
           'NOT_FOUND',
           `${JSON.stringify(path)} is not one of the folders files may be attached from`,
           {
-            hint: `They are: ${listed(roots)}. \`agentcomms attach\` lists them.`,
+            hint: `They are: ${listed(roots)}. ${listsThem(handoffs, 'them')}`,
           },
         );
       }
       return {
         changes: true,
         effects: [],
+        // Not among the effects, which an approval binds: a located command is this process's, not the one claiming.
         note:
           kept.length === 0
-            ? `No folder is left, so nothing can be attached until one is added with \`${ATTACH_ROOTS_ADD}\`.`
+            ? handoffSentenceToFill(
+                handoffs.core(['attach', 'roots', 'add']),
+                ['<folder>'],
+                (command) => `No folder is left, so nothing can be attached until one is added with ${command}.`,
+                { instead: 'No folder is left, so nothing can be attached until one is added with comms_attach.' },
+              )
             : null,
       };
     }
@@ -338,14 +364,14 @@ async function planChange(
       const own = builtIn.find((entry) => samePath(entry, path, home));
       if (own !== undefined) {
         throw new CommsError('USAGE', `${own} is on the built-in list, which cannot be removed`, {
-          hint: 'The built-in list is what is never attached whatever the configuration says: the configuration folder, every hidden folder in your home, ~/Library, any .git folder and any .env file. `agentcomms attach` lists it.',
+          hint: `The built-in list is what is never attached whatever the configuration says: the configuration folder, every hidden folder in your home, ~/Library, any .git folder and any .env file. ${listsThem(handoffs, 'it')}`,
         });
       }
       throw new CommsError(
         'NOT_FOUND',
         `${JSON.stringify(path)} is not one of your own entries that files may never come from`,
         {
-          hint: `Yours are: ${listed(deny)}. \`agentcomms attach\` lists them, and the built-in list beside them.`,
+          hint: `Yours are: ${listed(deny)}. ${listsThem(handoffs, 'them, and the built-in list beside them')}`,
         },
       );
     }

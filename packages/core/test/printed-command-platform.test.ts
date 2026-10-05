@@ -73,8 +73,10 @@ test('core passes a selected platform to every printed shell command', () => {
 
 test('organisation secret-store selection receives the operation platform', () => {
   const source = readFileSync(join(SOURCE, 'operations', 'organisations.ts'), 'utf8');
+  // The platform, and the handoffs its refusal's command is made with — made for that same platform (CUE-403).
   assert.match(
     source,
-    /chooseSecretStore\s*\(\s*config,\s*spec\.store,\s*\{\s*keyring:\s*options\.keyring,\s*platform:\s*options\.platform,?\s*\}\s*\)/,
+    /chooseSecretStore\s*\(\s*config,\s*spec\.store,\s*\{\s*keyring:\s*options\.keyring,\s*platform:\s*options\.platform,\s*handoffs:\s*commands\.handoffs,?\s*\}\s*\)/,
   );
+  assert.match(source, /const commands = orgHandoffs\(core, options\.platform\);/);
 });

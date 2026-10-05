@@ -139,14 +139,14 @@ Usage:
 A change that loosens something or cannot be taken back — policy chat, attach roots add, attach deny remove, mcp
 install and prune, update, secrets and names migrate, org add, update and remove — is shown before it happens. At a
 terminal you approve it there; anything else gets the preview and an approval id (exit 10), and runs the command again
-with --approval <id> once the person has agreed: in the chat under the \`chat\` change policy, with \`agentcomms
-approve\` under \`confirm\`. A tightening — policy confirm, attach roots remove, attach deny add — applies at once and
-asks nobody, and a --dry-run changes nothing.
+with --approval <id> once the person has agreed: in the chat under the \`chat\` change policy, with \`approve\` under
+\`confirm\`. A tightening — policy confirm, attach roots remove, attach deny add — applies at once and asks nobody,
+and a --dry-run changes nothing.
 
 Once a day this machine asks npm whether a newer release is out. When one is, every command but update, doctor,
 paths, approve and approvals stops first: at a terminal it asks "Update now, later today, or cancel?"; anywhere else
-it exits 11 and names \`agentcomms update\` and \`agentcomms update --later\`. Putting it off (--later) and turning the
-check off (--auto off) are changes a person approves. CI, and AGENT_COMMS_UPDATE_CHECK=off, skip it.
+it exits 11 and names the commands for update and update --later. Putting it off (--later) and turning the check
+off (--auto off) are changes a person approves. CI, and AGENT_COMMS_UPDATE_CHECK=off, skip it.
 
 Options:
   --config-dir <dir>     use this configuration directory for this run
@@ -274,7 +274,8 @@ function refuseApprovalNotTaken(command: string | undefined, sub: string | undef
   if (approvalId === undefined || takesApproval(command, sub)) return;
   // Reporting the policy takes none, in the words `comms_change_policy` refuses it with.
   if (command === 'policy') refuseApprovalWithoutChange(String(approvalId));
-  const typed = ['agentcomms', command, sub].filter((word) => word !== undefined).join(' ');
+  // The command's own words, without the program: a bare `agentcomms` is not what runs here (CUE-403).
+  const typed = [command, sub].filter((word) => word !== undefined).join(' ');
   throw new CommsError('USAGE', `\`${typed}\` takes no --approval: it makes no change a person approves`, {
     hint: 'An approval goes with the change it was prepared for — policy chat|confirm, attach roots|deny add|remove, org add|update|remove, mcp install, mcp prune, names migrate, secrets migrate or update — run again exactly as the preview named it. Nothing was run.',
   });
@@ -473,7 +474,7 @@ export async function main(
         const scope = { inbox: values.inbox, account: values.account };
         if (sub === undefined) {
           // Reporting takes no --approval: refused with the rest, before the update check's stop.
-          writeResult(changePolicyReport(await core.config.load(), scope, platform), output, renderPolicy);
+          writeResult(changePolicyReport(await core.config.load(), scope, handoffs), output, renderPolicy);
           return;
         }
         if (!isChangePolicy(sub)) throw usage(`"${sub}" is not a change policy; use chat or confirm`);
@@ -543,7 +544,7 @@ export async function main(
           }
           flagsOf(['for-other-addresses', 'adopt', 'store']);
           // The file as it will be read, absolute: the command run again from another directory reads the same file.
-          const path = profileSourcePath(target, env, undefined, platform);
+          const path = profileSourcePath(target, env, undefined, handoffs);
           const repeated = rerunPath(path);
           const command = repeated === null ? ['org', 'add', '--help'] : ['org', 'add', repeated];
           if (values['for-other-addresses']) command.push('--for-other-addresses');
@@ -584,7 +585,7 @@ export async function main(
           let repeatedSource = true;
           // The source as it will be read, absolute: the command run again from another directory reads the same file.
           if (values.source !== undefined) {
-            const source = rerunPath(profileSourcePath(values.source, env, undefined, platform));
+            const source = rerunPath(profileSourcePath(values.source, env, undefined, handoffs));
             repeatedSource = source !== null;
             if (source !== null) command.push('--source', source);
           }

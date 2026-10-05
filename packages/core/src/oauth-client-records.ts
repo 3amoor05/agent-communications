@@ -1,5 +1,6 @@
 import { type ClientConfig, type Config, type StoreKind, secretsStoreFor } from './config.ts';
 import { CommsError } from './errors.ts';
+import type { HandoffMaker } from './handoff-text.ts';
 import { keepAndReport, writeOutcome } from './reconcile.ts';
 import { type KeyringModule, probeKeychain, type SecretStore } from './secrets.ts';
 
@@ -74,9 +75,18 @@ export function gmailClientRow(input: {
 export async function chooseSecretStore(
   config: Config,
   requested: StoreKind | undefined,
-  options: { keyring?: KeyringModule | null | undefined; platform?: NodeJS.Platform | undefined } = {},
+  options: {
+    keyring?: KeyringModule | null | undefined;
+    platform?: NodeJS.Platform | undefined;
+    /** The caller's handoffs, for the command a refusal names (CUE-403); they carry their platform. */
+    handoffs?: HandoffMaker | undefined;
+  } = {},
 ): Promise<{ store: StoreKind; choosing: boolean }> {
-  const chosen: { store: StoreKind; choosing: boolean } = secretsStoreFor(config, requested, options.platform);
+  const chosen: { store: StoreKind; choosing: boolean } = secretsStoreFor(
+    config,
+    requested,
+    options.handoffs ?? options.platform,
+  );
   if (!chosen.choosing || chosen.store !== 'keychain') return chosen;
   // `null` is a machine without the module, answered here: `probeKeychain` loads the real one when handed none.
   const probe =

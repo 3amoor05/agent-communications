@@ -4,6 +4,7 @@ import { open, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CommsError } from './errors.ts';
 import { writeFileAtomic } from './fs.ts';
+import { asHandoffMaker, type HandoffMaker, handoffSentence } from './handoff-text.ts';
 
 /**
  * Where refresh tokens, client secrets and approval keys live. Two backends, chosen per inbox or client and recorded
@@ -41,12 +42,25 @@ export const KEYCHAIN_SERVICE = 'agent-communications';
  */
 export const KEYCHAIN_TIMEOUT_MS = 12_000;
 
+/** What a store's refusals are told with: the printing package's handoffs, for the command one names (CUE-403). */
+export interface SecretStoreOptions {
+  /** `core.handoffs`; left out, a refusal names the bare command it always has (the deprecated bridge). */
+  readonly handoffs?: HandoffMaker | undefined;
+}
+
+/** "Run the doctor": core's, located from whatever is printing, or why there is none here. */
+function doctorSentence(handoffs: HandoffMaker | undefined, say: (command: string) => string): string {
+  return handoffSentence(asHandoffMaker(handoffs).core(['doctor']), say, { instead: 'Call comms_doctor from a chat.' });
+}
+
 export class FileSecretStore implements SecretStore {
   readonly kind = 'file' as const;
   readonly directory: string;
+  readonly #handoffs: HandoffMaker | undefined;
 
-  constructor(directory: string) {
+  constructor(directory: string, options: SecretStoreOptions = {}) {
     this.directory = directory;
+    this.#handoffs = options.handoffs;
   }
 
   #path(ref: string): string {
@@ -71,7 +85,7 @@ export class FileSecretStore implements SecretStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw new CommsError('SECRET_STORE_UNAVAILABLE', 'a stored secret file could not be read', {
-        hint: 'Run `agentcomms doctor`; re-authorise the inbox if the file is damaged.',
+        hint: `${doctorSentence(this.#handoffs, (command) => `Run ${command}.`)} Re-authorise the inbox if the file is damaged.`,
         cause: error,
       });
     }
@@ -124,7 +138,12 @@ class KeychainTimeout extends Error {
   override name = 'KeychainTimeout';
 }
 
-function keychainError(action: string, cause: unknown, timeoutMs: number): CommsError {
+function keychainError(
+  action: string,
+  cause: unknown,
+  timeoutMs: number,
+  handoffs: HandoffMaker | undefined,
+): CommsError {
   const timedOut = cause instanceof KeychainTimeout;
   return new CommsError(
     timedOut ? 'KEYCHAIN_APPROVAL_PENDING' : 'SECRET_STORE_UNAVAILABLE',
@@ -133,8 +152,8 @@ function keychainError(action: string, cause: unknown, timeoutMs: number): Comms
       : `the system keychain refused to ${action} (it may be locked, or access was denied)`,
     {
       hint: timedOut
-        ? 'Look for a system dialog asking to allow access to the keychain, then retry. Run `agentcomms doctor` for details.'
-        : 'Unlock the keychain and retry, or run `agentcomms doctor`. On macOS a Node upgrade can require allowing access again.',
+        ? `Look for a system dialog asking to allow access to the keychain, then retry. ${doctorSentence(handoffs, (command) => `Run ${command} for details.`)}`
+        : `Unlock the keychain and retry. ${doctorSentence(handoffs, (command) => `Run ${command} for details.`)} On macOS a Node upgrade can require allowing access again.`,
       details: { reason: timedOut ? 'KEYCHAIN_APPROVAL_PENDING' : 'KEYCHAIN_UNAVAILABLE' },
       cause,
     },
@@ -162,6 +181,7 @@ export class KeychainSecretStore implements SecretStore {
   readonly #module: KeyringModule;
   readonly #timeoutMs: number;
   readonly #namespace: string;
+  readonly #handoffs: HandoffMaker | undefined;
   /** One keychain call at a time: parallel calls would each raise their own OS prompt and exhaust the thread pool. */
   #queue: Promise<unknown> = Promise.resolve();
   /**
@@ -176,10 +196,16 @@ export class KeychainSecretStore implements SecretStore {
    * @param namespace keeps entries of different config directories apart (a test run or a second setup must never
    *   read or overwrite another's `client:default:secret`); see {@link keychainNamespace}.
    */
-  constructor(module: KeyringModule, namespace: string, timeoutMs: number = KEYCHAIN_TIMEOUT_MS) {
+  constructor(
+    module: KeyringModule,
+    namespace: string,
+    timeoutMs: number = KEYCHAIN_TIMEOUT_MS,
+    options: SecretStoreOptions = {},
+  ) {
     this.#module = module;
     this.#namespace = namespace;
     this.#timeoutMs = timeoutMs;
+    this.#handoffs = options.handoffs;
   }
 
   #entry(ref: string): KeyringEntry {
@@ -190,7 +216,7 @@ export class KeychainSecretStore implements SecretStore {
 
   #serial<T>(action: string, fn: () => Promise<T>): Promise<T> {
     const run = this.#queue.then(async () => {
-      if (this.#stuck) throw keychainError(action, new KeychainTimeout(), this.#timeoutMs);
+      if (this.#stuck) throw keychainError(action, new KeychainTimeout(), this.#timeoutMs, this.#handoffs);
       const native = fn();
       try {
         return await raceTimeout(native, this.#timeoutMs);
@@ -205,7 +231,7 @@ export class KeychainSecretStore implements SecretStore {
             if (this.#stuck === stuck) this.#stuck = null;
           });
         }
-        throw keychainError(action, error, this.#timeoutMs);
+        throw keychainError(action, error, this.#timeoutMs, this.#handoffs);
       }
     });
     this.#queue = run.catch(() => undefined);
@@ -279,9 +305,10 @@ export async function probeKeychain(module: KeyringModule | null = null, namespa
 /** Opens the backend recorded in config for an inbox or client. */
 export async function openSecretStore(
   kind: SecretStoreKind,
-  options: { secretsDir: string; namespace: string; keyring?: KeyringModule | null },
+  options: { secretsDir: string; namespace: string; keyring?: KeyringModule | null } & SecretStoreOptions,
 ): Promise<SecretStore> {
-  if (kind === 'file') return new FileSecretStore(options.secretsDir);
+  const told = { handoffs: options.handoffs };
+  if (kind === 'file') return new FileSecretStore(options.secretsDir, told);
   const keyring = options.keyring === undefined ? await loadKeyringModule() : options.keyring;
   if (!keyring) {
     throw new CommsError(
@@ -292,5 +319,5 @@ export async function openSecretStore(
       },
     );
   }
-  return new KeychainSecretStore(keyring, options.namespace);
+  return new KeychainSecretStore(keyring, options.namespace, KEYCHAIN_TIMEOUT_MS, told);
 }

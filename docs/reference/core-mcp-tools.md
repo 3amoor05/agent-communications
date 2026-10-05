@@ -95,7 +95,7 @@ Takes no arguments.
 
 ### `comms_change_policy`
 
-Report or set the change policy — how a loosening is approved: `chat`, a yes in this conversation, or `confirm`, a code the person types at their own terminal — for the defaults, one mailbox, or one account or workspace. Without `set` it only reports. Tightening to `confirm` applies at once. Loosening to `chat` is itself a change, approved under the policy in force, `confirm`: the person runs `agentcomms approve <approvalId>` before you call again with the id. A mailbox or account or workspace that sets `chat` itself keeps it when the default is tightened: the result then carries `warning` and `looser`, each with the call that tightens it — show the warning to the person.
+Report or set the change policy — how a loosening is approved: `chat`, a yes in this conversation, or `confirm`, a code the person types at their own terminal — for the defaults, one mailbox, or one account or workspace. Without `set` it only reports. Tightening to `confirm` applies at once. Loosening to `chat` is itself a change, approved under the policy in force, `confirm`: the person runs the approve command the result gives, at their own terminal, before you call again with the id. A mailbox or account or workspace that sets `chat` itself keeps it when the default is tightened: the result then carries `warning` and `looser`, each with the call that tightens it — show the warning to the person.
 
 *writes*
 
@@ -104,7 +104,7 @@ Report or set the change policy — how a loosening is approved: `chat`, a yes i
 | `inbox` | string | no | one mailbox, as `organisation/gmail` |
 | `account` | string | no | one account or workspace, as `organisation/resend`, `organisation/slack` or `organisation/whatsapp` |
 | `set` | `chat` \\| `confirm` | no | the policy to set; leave out to report |
-| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm` |
+| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with the approve command the result gives under `confirm` |
 
 ### `comms_attach`
 
@@ -118,7 +118,7 @@ Report or change which local files may be attached to a draft, an email or a pos
 | `rootsRemove` | string | no | stop attaching files from under this folder — at once |
 | `denyAdd` | string | no | never attach files from this path — at once |
 | `denyRemove` | string | no | take this path off your own deny entries, so files there can be attached again — approved first |
-| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm` |
+| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with the approve command the result gives under `confirm` |
 
 ### `comms_orgs_list`
 
@@ -150,7 +150,7 @@ Add an organisation’s profile — the small JSON file naming its Google OAuth 
 | `forOtherAddresses` | boolean | no | also let this organisation’s client serve the person’s mailboxes outside it — only when they ask |
 | `adopt` | string | no | the OAuth client already registered here to use as the organisation’s, when its client id is registered under more than one name |
 | `store` | `keychain` \\| `file` | no | where secrets are kept, only when this writes the first one here: keychain (default) or file |
-| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm` |
+| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with the approve command the result gives under `confirm` |
 
 ### `comms_org_update`
 
@@ -165,7 +165,7 @@ Read an organisation profile again from its file, apply what changed in it, and 
 | `forOtherAddresses` | `on` \\| `off` | no | `on` lets its client serve the person’s other mailboxes too (approved first); `off` applies at once |
 | `adopt` | string | no | the OAuth client already registered here to use as the organisation’s, when its client id is registered under more than one name |
 | `store` | `keychain` \\| `file` | no | where secrets are kept, only when this writes the first one here: keychain (default) or file |
-| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm` |
+| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with the approve command the result gives under `confirm` |
 
 ### `comms_org_remove`
 
@@ -176,7 +176,7 @@ Forget an organisation profile, and delete the OAuth clients it made here with t
 | Argument | Type | Required | What it is |
 |---|---|---|---|
 | `organisation` | string | **yes** | the organisation, as the first half of its account names: `rgc` |
-| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm` |
+| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with the approve command the result gives under `confirm` |
 
 ### `comms_server_install`
 
@@ -197,7 +197,7 @@ Register a channel’s MCP server — `gmail`, `resend`, `slack`, `whatsapp`, or
 | `force` | boolean | no | replace this server’s own earlier entry of the same name — how an upgrade reaches a client |
 | `print` | boolean | no | only return the entry to paste; write nothing |
 | `noVerify` | boolean | no | do not start the server to check the entry works |
-| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm` |
+| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with the approve command the result gives under `confirm` |
 
 ### `comms_server_prune`
 
@@ -210,7 +210,7 @@ Remove a channel’s managed runtimes that no client config names, no printed en
 | `channel` | `core` \\| `gmail` \\| `resend` \\| `slack` \\| `whatsapp` | **yes** | whose runtimes |
 | `dryRun` | boolean | no | only say what would be removed |
 | `includePrinted` | boolean | no | also remove runtimes kept only because an entry for them was printed, once those entries are gone |
-| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm` |
+| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with the approve command the result gives under `confirm` |
 
 ### `comms_update`
 
@@ -224,7 +224,7 @@ Bring this machine to the latest published release. `check: true` reads the npm 
 | `noVerify` | boolean | no | do not start each registered server to check that it answers |
 | `later` | boolean | no | not now: every server and command on this machine carries on without stopping for the update until midnight, local time. A change the person approves: the first call returns its preview and an approvalId |
 | `auto` | `on` \\| `off` | no | turn the daily update check on or off for this machine. `off` is a change the person approves, like `later`; `on` applies at once |
-| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm` |
+| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with the approve command the result gives under `confirm` |
 
 ### `comms_names_migrate`
 
@@ -236,7 +236,7 @@ Rename every mailbox and workspace to `organisation/platform`. `dryRun` shows th
 |---|---|---|---|
 | `renames` | string[] | no | overrides, each `old=new`; qualify a name both maps use as `inbox:old=new` or `account:old=new` |
 | `dryRun` | boolean | no | only show the mapping |
-| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm` |
+| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with the approve command the result gives under `confirm` |
 
 ### `comms_secrets_migrate`
 
@@ -247,4 +247,4 @@ Move every credential between the system keychain and files on this disk, and de
 | Argument | Type | Required | What it is |
 |---|---|---|---|
 | `to` | `keychain` \\| `file` | **yes** | where credentials should be kept |
-| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm` |
+| `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with the approve command the result gives under `confirm` |

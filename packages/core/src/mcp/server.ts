@@ -5,7 +5,7 @@ import { CHANNELS } from '../channel-servers.ts';
 import { accountChannels, listed, narrowingOwner } from '../channel-words.ts';
 import { type Core, openCore } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
-import { CORE_CALLER } from '../handoffs.ts';
+import { CORE_CALLER, handoffsFor } from '../handoffs.ts';
 import { installFailure, SERVER_NAME_MESSAGE, SERVER_NAME_PATTERN } from '../mcp-install.ts';
 import { ATTACH_CHANGE_KINDS, attachChange, attachReport } from '../operations/attach-settings.ts';
 import {
@@ -112,8 +112,8 @@ async function buildInstructions(core: Core): Promise<string> {
     '(comms_org_add, comms_org_update, comms_org_remove) — is shown to the person before it happens. The first call',
     'returns `approvalRequired` with a `preview` and an `approvalId`: show the preview in full and ask. Then call the',
     'same tool again, with the same arguments and the `approvalId`. Under the `chat` change policy the person’s yes in',
-    'this conversation is the approval; under `confirm` they run `agentcomms approve <approvalId>` in their own',
-    'terminal first — you cannot approve it for them, so say so and wait. If they say no, call comms_approval_revoke.',
+    'this conversation is the approval; under `confirm` they first run the approve command the result gives, in their',
+    'own terminal — you cannot approve it for them, so say so and wait. If they say no, call comms_approval_revoke.',
     'Tightening applies at once — even beside a change that waits: comms_org_update with forOtherAddresses "off"',
     'turns that off before its preview is returned, and the preview marks it done.',
     '',
@@ -215,7 +215,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       .string()
       .optional()
       .describe(
-        'leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm`',
+        'leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with the approve command the result gives under `confirm`',
       ),
   };
 
@@ -311,7 +311,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
     'comms_change_policy',
     {
       title: 'The change policy',
-      description: `Report or set the change policy — how a loosening is approved: \`chat\`, a yes in this conversation, or \`confirm\`, a code the person types at their own terminal — for the defaults, one ${MAILBOX}, or one ${ACCOUNT_NOUNS}. Without \`set\` it only reports. Tightening to \`confirm\` applies at once. Loosening to \`chat\` is itself a change, approved under the policy in force, \`confirm\`: the person runs \`agentcomms approve <approvalId>\` before you call again with the id. A ${MAILBOX} or ${ACCOUNT_NOUNS} that sets \`chat\` itself keeps it when the default is tightened: the result then carries \`warning\` and \`looser\`, each with the call that tightens it — show the warning to the person.`,
+      description: `Report or set the change policy — how a loosening is approved: \`chat\`, a yes in this conversation, or \`confirm\`, a code the person types at their own terminal — for the defaults, one ${MAILBOX}, or one ${ACCOUNT_NOUNS}. Without \`set\` it only reports. Tightening to \`confirm\` applies at once. Loosening to \`chat\` is itself a change, approved under the policy in force, \`confirm\`: the person runs the approve command the result gives, at their own terminal, before you call again with the id. A ${MAILBOX} or ${ACCOUNT_NOUNS} that sets \`chat\` itself keeps it when the default is tightened: the result then carries \`warning\` and \`looser\`, each with the call that tightens it — show the warning to the person.`,
       inputSchema: {
         inbox: z
           .string()
@@ -338,7 +338,11 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       if (args.set === undefined) {
         return read(async () => {
           refuseApprovalWithoutChange(args.approvalId);
-          return changePolicyReport(await core.config.load(), { inbox: args.inbox, account: args.account }, platform);
+          return changePolicyReport(
+            await core.config.load(),
+            { inbox: args.inbox, account: args.account },
+            handoffsFor(core, { platform }),
+          );
         });
       }
       const to = args.set as (typeof CHANGE_POLICIES)[number];

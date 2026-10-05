@@ -7,11 +7,14 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { renderAttach } from '../src/cli.ts';
+import { lineWithWordsToFill } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
+import { CommsError } from '../src/errors.ts';
+import { CORE_CALLER, isCommand } from '../src/handoffs.ts';
 import { defaultAttachDeny } from '../src/jail.ts';
 import { createCoreMcpServer } from '../src/mcp/server.ts';
 import { attachReport, checkedPath } from '../src/operations/attach-settings.ts';
-import { coreCommand, coreHandoffs, coreInline } from './helpers/handoffs.ts';
+import { assertNoBareCommand, coreCommand, coreHandoffs, coreInline } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -33,7 +36,7 @@ interface Machine {
   core: Core;
 }
 
-function machine(defaults?: Record<string, unknown>): Machine {
+function machine(defaults?: Record<string, unknown>, options: { located?: boolean } = {}): Machine {
   const home = tempDir('comms-attach-');
   const configDir = join(home, 'config');
   mkdirSync(configDir);
@@ -50,7 +53,8 @@ function machine(defaults?: Record<string, unknown>): Machine {
     AGENT_COMMS_CLIENT_CLI_DIRS: '',
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  return { home, configDir, env, core: openCore({ env }) };
+  // `located`: opened as core's own server opens it, so what it names is located (CUE-403).
+  return { home, configDir, env, core: openCore(options.located ? { env, caller: CORE_CALLER } : { env }) };
 }
 
 function cli(m: Machine, args: string[], extra: Record<string, string> = {}) {
@@ -241,6 +245,39 @@ test('a deny entry is added at once, and removing one is approved first', async 
   } finally {
     await close();
   }
+});
+
+test('what the attachment lists name to run is core’s own command, located — a note, a refusal, an example (7d-core)', async () => {
+  const m = machine({ attachRoots: ['~/outgoing'], attachDeny: [] }, { located: true });
+  const lists = coreInline(m.core.paths, ['attach']);
+  const { ok, error, close } = await connect(m);
+  try {
+    const notListed = await error({ rootsRemove: '~/elsewhere' });
+    assert.equal(notListed.hint, `They are: ~/outgoing. ${lists} lists them.`);
+    const builtIn = await error({ denyRemove: '~/Library' });
+    assert.ok(builtIn.hint?.endsWith(` ${lists} lists it.`), builtIn.hint ?? '');
+    const notYours = await error({ denyRemove: '~/nothing' });
+    assert.equal(notYours.hint, `Yours are: none. ${lists} lists them, and the built-in list beside them.`);
+    // The last folder taken out: the command that adds one, with the folder for the agent to fill in.
+    const emptied = (await ok({ rootsRemove: '~/outgoing' })).result as { note: string };
+    const add = coreHandoffs(m.core.paths).core(['attach', 'roots', 'add']);
+    assert.ok(isCommand(add));
+    assert.equal(
+      emptied.note,
+      `No folder is left, so nothing can be attached until one is added with \`${lineWithWordsToFill(add, '<folder>')}\`.`,
+    );
+    for (const text of [notListed.hint, builtIn.hint, notYours.hint, emptied.note]) assertNoBareCommand(String(text));
+  } finally {
+    await close();
+  }
+  // A folder that is not named at all: an example, as a whole command.
+  assert.throws(
+    () => checkedPath('', 'linux', coreHandoffs(m.core.paths, 'linux')),
+    (thrown: unknown) =>
+      thrown instanceof CommsError &&
+      thrown.hint ===
+        `For example: ${coreInline(m.core.paths, ['attach', 'roots', 'add', '~/Documents/outgoing'], 'linux')}.`,
+  );
 });
 
 test('the built-in list cannot be removed, a relative path is refused, and one call makes one change', async () => {

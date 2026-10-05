@@ -1,4 +1,4 @@
-import { connectMailboxCommand } from './channel-words.ts';
+import { connectMailboxWords } from './channel-words.ts';
 import {
   type AccountConfig,
   type Config,
@@ -78,10 +78,10 @@ export function resolveName(
   throw notFound?.() ?? defaultNotFound(config, kind, name);
 }
 
-/** What to say when there are no mailboxes at all: the command that connects one, from the mail channel's manifest. */
+/** What to say when there are no mailboxes at all: how one is connected, in words (`connectMailboxWords`). */
 function noInboxesHint(): string {
-  const connect = connectMailboxCommand();
-  return connect ? `No inboxes yet: add one with \`${connect}\`.` : 'No inboxes yet.';
+  const connect = connectMailboxWords();
+  return connect ? `No inboxes yet: add one with ${connect}, at a terminal or from a chat.` : 'No inboxes yet.';
 }
 
 function defaultNotFound(config: Config, kind: NameKind, name: string): CommsError {

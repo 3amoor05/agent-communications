@@ -44,11 +44,11 @@ export interface OpenCoreOptions extends PathEnvironment {
 export function openCore(options: OpenCoreOptions = {}): Core {
   const { paths, pathOverrides } = resolvePathIdentity(options);
   const now = options.now ?? (() => new Date());
-  const config = new ConfigStore(paths.configDir);
   const handoffs =
     options.caller === undefined
       ? undefined
       : cliHandoffs({ caller: options.caller, paths, platform: options.platform, env: options.env });
+  const config = new ConfigStore(paths.configDir, { handoffs });
   let cached: { kind: SecretStoreKind; store: SecretStore } | null = null;
   return {
     paths,
@@ -67,6 +67,7 @@ export function openCore(options: OpenCoreOptions = {}): Core {
       const store = await openSecretStore(chosen, {
         secretsDir: paths.secretsDir,
         namespace: keychainNamespace(paths.configDir),
+        handoffs,
       });
       cached = { kind: chosen, store };
       return store;

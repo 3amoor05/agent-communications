@@ -30,6 +30,7 @@ import {
 } from '../src/names.ts';
 import { enableNamesMigrationForTests } from '../src/release-gate.ts';
 import { parseConfigAsReleased014 } from './fixtures/v0.1.4-version-gate.ts';
+import { coreHandoffs, coreInline } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 // The transition is what these tests are about; `release-gate.test.ts` proves it is off by default.
@@ -799,6 +800,24 @@ test('a renamed row between preview and apply refuses the migration, and writes 
   const before = readFileSync(store.path, 'utf8');
   await assert.rejects(migrateNames(store, plan), isError('TRANSIENT', /changed after the preview/));
   assert.equal(readFileSync(store.path, 'utf8'), before);
+});
+
+test('a refused migration names the migration again: core’s command, located from the handoffs the store has (7d-core)', async () => {
+  for (const located of [true, false]) {
+    const dir = tempDir('comms-names-');
+    writeFileSync(join(dir, 'config.json'), `${JSON.stringify(machine(), null, 2)}\n`);
+    const paths = { configDir: dir, stateDir: dir, dataDir: dir, secretsDir: dir, downloadsDir: dir };
+    // Core's own, as `openCore({ caller })` gives the store; without them, the bridge's bare command.
+    const store = new ConfigStore(dir, located ? { handoffs: coreHandoffs(paths) } : {});
+    const plan = ready(planNamesMigration(await store.load()));
+    await store.update((config) => renameEntry(config, 'inbox', 'cue', 'cue-old'));
+    const again = located ? coreInline(paths, ['names', 'migrate']) : '`agentcomms names migrate`';
+    await assert.rejects(migrateNames(store, plan), (error: unknown) => {
+      assert.ok(error instanceof CommsError && error.code === 'TRANSIENT', String(error));
+      assert.equal(error.hint, `Run ${again} again to see the mapping for the configuration as it is now.`);
+      return true;
+    });
+  }
 });
 
 test('a change to nothing but a policy between preview and apply refuses it too', async () => {

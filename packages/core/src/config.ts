@@ -4,10 +4,10 @@ import { homedir, platform } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
-import { inlineCommand, shellCommand } from './cli-runtime.ts';
 import { type ConfigVersion, NEW_CONFIG_VERSION } from './config-version.ts';
 import { CommsError } from './errors.ts';
 import { FILE_MODE, writeFileAtomic } from './fs.ts';
+import { asHandoffMaker, type HandoffMaker, type HandoffsOrPlatform, handoffSentence } from './handoff-text.ts';
 import { namesItsPlace } from './jail.ts';
 import { withCredentialsLock, withFileLock } from './lock.ts';
 import { NAME_MESSAGE, NAME_PATTERN, ORGANISATION_PATTERN, parseName, parseOrganisation } from './name-grammar.ts';
@@ -717,18 +717,24 @@ export function committedSecretsStore(config: Config): StoreKind | null {
  * asked for, the keychain by default. `choosing` says this command is the one choosing it.
  *
  * A different backend asked for is refused, not taken: one backend holds everything here, and changing it has to move
- * what is already stored, which is what `agentcomms secrets migrate` does and nothing else does.
+ * what is already stored, which is what `agentcomms secrets migrate` does and nothing else does. The refusal names that
+ * command, made by `handoffs` — the caller's, located (CUE-403) — or, for a bare platform, the bridge's bare one.
  */
 export function secretsStoreFor(
   config: Config,
   requested: StoreKind | undefined,
-  platform: NodeJS.Platform = process.platform,
+  handoffs: HandoffsOrPlatform = process.platform,
 ): { store: StoreKind; choosing: boolean } {
   const committed = committedSecretsStore(config);
   if (committed === null) return { store: requested ?? 'keychain', choosing: true };
   if (requested !== undefined && requested !== committed) {
+    const migrate = handoffSentence(
+      asHandoffMaker(handoffs).core(['secrets', 'migrate', '--to', requested]),
+      (command) => `To change it, run ${command}, then run this again.`,
+      { instead: 'To change it, call comms_secrets_migrate from a chat, then run this again.' },
+    );
     throw new CommsError('CONFIG', `this configuration already keeps its secrets in the ${committed} store`, {
-      hint: `Everything here uses one store, and changing it moves what is already stored. To change it, run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', requested], platform))}, then run this again.`,
+      hint: `Everything here uses one store, and changing it moves what is already stored. ${migrate}`,
     });
   }
   return { store: committed, choosing: false };
@@ -845,12 +851,27 @@ export function parseConfig(text: string, source = 'config.json'): Config {
 export class ConfigStore {
   readonly path: string;
   readonly #lockPath: string;
+  readonly #handoffs: HandoffMaker | undefined;
   #cache: { key: string; config: Config } | null = null;
 
-  constructor(configDir: string) {
+  /**
+   * @param options.handoffs the printing package's handoffs (`core.handoffs`, CUE-403), for the command a refusal
+   *   names; left out, it names the bare command it always has — the deprecated bridge.
+   */
+  constructor(configDir: string, options: { readonly handoffs?: HandoffMaker | undefined } = {}) {
     this.path = join(configDir, 'config.json');
     // The lock sits next to the file it guards, so an overridden state directory cannot split it.
     this.#lockPath = join(configDir, '.config.lock');
+    this.#handoffs = options.handoffs;
+  }
+
+  /** "Run the names migration again", as core's command — located from whatever is printing — or the tool. */
+  #namesMigrateAgain(why: string): string {
+    return handoffSentence(
+      asHandoffMaker(this.#handoffs).core(['names', 'migrate']),
+      (command) => `Run ${command} again ${why}.`,
+      { instead: `Call comms_names_migrate again ${why}.` },
+    );
   }
 
   /** The current config; an empty one when the file does not exist yet. */
@@ -897,7 +918,7 @@ export class ConfigStore {
           throw new CommsError(
             'CONFIG',
             `refusing to change the config version from ${current.version} to ${String((next as { version?: unknown }).version)}`,
-            { hint: 'Only `agentcomms names migrate` changes the version. This is a bug — please report it.' },
+            { hint: 'Only the names migration changes the version. This is a bug — please report it.' },
           );
         }
         const parsed = schemaFor(current.version).safeParse(next);
@@ -924,7 +945,7 @@ export class ConfigStore {
            * to a shell it may not have, for a change it could have asked for in the conversation.
            */
           throw new CommsError('LOOSENING_REFUSED', `this change loosens a safety setting: ${unconsented.join(', ')}`, {
-            hint: 'A person approves a loosening, from a chat or at a terminal. From a chat, the tool that makes the change returns a preview and an approval id: the person says yes in the chat (change policy `chat`) or runs `agentcomms approve <id>` at their own terminal (`confirm`), and the tool is called again with the id. At a terminal, run the matching command and approve the change it shows.',
+            hint: 'A person approves a loosening, from a chat or at a terminal. From a chat, the tool that makes the change returns a preview and an approval id: the person says yes in the chat (change policy `chat`) or runs the approve command the result gives at their own terminal (`confirm`), and the tool is called again with the id. At a terminal, run the matching command and approve the change it shows.',
             details: { paths: unconsented },
           });
         }
@@ -1014,14 +1035,14 @@ export class ConfigStore {
         if (current.version === 2) {
           if (!migrationApplied(current, rows)) {
             throw new CommsError('TRANSIENT', 'the names were migrated while this ran, and not to these names', {
-              hint: 'Run `agentcomms names migrate` again to see what they are called now.',
+              hint: this.#namesMigrateAgain('to see what they are called now'),
             });
           }
           return { status: 'already-migrated' as const, config: current };
         }
         if (configFingerprint(current) !== expected) {
           throw new CommsError('TRANSIENT', 'the configuration changed after the preview was made', {
-            hint: 'Run `agentcomms names migrate` again to see the mapping for the configuration as it is now.',
+            hint: this.#namesMigrateAgain('to see the mapping for the configuration as it is now'),
           });
         }
         const parsed = configV2Schema.safeParse(build(structuredClone(current)));

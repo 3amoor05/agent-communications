@@ -1,7 +1,7 @@
 import { approvalKind } from '../approvals.ts';
 import type { GatedChange } from '../change-flow.ts';
 import { type ChangeRequest, type ChangeSurface, revokeChange } from '../changes.ts';
-import { inlineCommand, shellCommand } from '../cli-runtime.ts';
+import { inlineCommand, type ShellCommand } from '../cli-runtime.ts';
 import {
   type ClientConfig,
   type Config,
@@ -14,6 +14,15 @@ import {
 } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
+import {
+  type Handoff,
+  type HandoffMaker,
+  handoffSentence,
+  handoffSentenceToFill,
+  handoffsFor,
+  isCommand,
+  registeredFor,
+} from '../handoffs.ts';
 import { withCredentialsLock } from '../lock.ts';
 import { organisationProblem } from '../name-grammar.ts';
 import { chooseSecretStore, clientSecretRef, gmailClientRow, writeSecretWithRestore } from '../oauth-client-records.ts';
@@ -39,6 +48,7 @@ import {
   slackRecordFrom,
   strayMarkedRows,
   unmanagedSlackAccounts,
+  withEach,
 } from '../organisations.ts';
 import { writeOutcome } from '../reconcile.ts';
 import type { KeyringModule, SecretStore } from '../secrets.ts';
@@ -194,7 +204,7 @@ function organisationArgument(value: unknown): string {
   return word;
 }
 
-function requireRecord(config: Config, organisation: string, platform: NodeJS.Platform): OrganisationRecord {
+function requireRecord(config: Config, organisation: string, handoffs: HandoffMaker): OrganisationRecord {
   const record = recordOf(config, organisation);
   if (!record) {
     const known = Object.keys(organisationsOf(config));
@@ -202,10 +212,60 @@ function requireRecord(config: Config, organisation: string, platform: NodeJS.Pl
       hint:
         known.length > 0
           ? `Added here: ${known.join(', ')}.`
-          : `Add one with ${inlineCommand(shellCommand(['agentcomms', 'org', 'add', '--help'], platform))}.`,
+          : handoffSentence(
+              handoffs.core(['org', 'add', '--help'], { uses: [] }),
+              (command) => `Add one with ${command}.`,
+              {
+                instead: 'Add one with comms_org_add from a chat.',
+              },
+            ),
     });
   }
   return record;
+}
+
+/**
+ * The commands an organisation's operation names: core's own, located from whatever is printing (CUE-403), and —
+ * read only when a line needs one — Gmail's and Slack's, found among the servers registered with this machine's MCP
+ * clients. Reading the registrations costs a scan of every client's configuration, so it is put off until a line names
+ * another product, and done once.
+ */
+interface OrgHandoffs {
+  readonly handoffs: HandoffMaker;
+  /** The same handoffs, able to find another product's command. */
+  crossProduct(): Promise<HandoffMaker>;
+}
+
+/**
+ * How to put things right once the store can be written to, as the clause that ends the secret writer's sentence:
+ * `org update`, located — or the tool, with why there is no command in brackets after it.
+ */
+function restoreClause(update: Handoff | ShellCommand): string {
+  return isCommand(update)
+    ? `run ${inlineCommand(update)} once the store can be written to.`
+    : `call comms_org_update from a chat once the store can be written to (${update.message.replace(/\.$/, '')}).`;
+}
+
+/** Slack's command with these words, for each account: found among the servers registered here. */
+async function slackFor(
+  commands: OrgHandoffs,
+  accounts: readonly string[],
+  words: readonly string[],
+): Promise<(Handoff | ShellCommand)[]> {
+  const handoffs = await commands.crossProduct();
+  return accounts.map((name) => handoffs.of('slack', [...words, name]));
+}
+
+function orgHandoffs(core: Core, platform: NodeJS.Platform): OrgHandoffs {
+  const handoffs = handoffsFor(core, { platform });
+  let registered: Promise<HandoffMaker> | undefined;
+  return {
+    handoffs,
+    crossProduct: () => {
+      registered ??= registeredFor(handoffs);
+      return registered;
+    },
+  };
 }
 
 function canonical(value: unknown): string {
@@ -305,7 +365,8 @@ interface PlanInput {
   forOtherAddresses: 'on' | 'off' | undefined;
   adopt: string | undefined;
   now: string;
-  platform: NodeJS.Platform;
+  /** The commands its lines and refusals name. */
+  commands: OrgHandoffs;
   /** The secret held under a reference now, in the store the configuration uses; null when none is stored. */
   readSecret: (ref: string) => Promise<string | null>;
 }
@@ -369,30 +430,44 @@ function sameServes(a: OrganisationGeneration['serves'], b: OrganisationGenerati
 async function planProfile(config: Config, input: PlanInput): Promise<ProfilePlan> {
   const { file, now } = input;
   const { profile } = file;
+  const { handoffs } = input.commands;
   if (config.version !== 2) {
     throw new CommsError('CONFIG', 'an organisation profile needs the configuration’s organisation/platform names', {
-      hint: `Run ${inlineCommand(
-        shellCommand(['agentcomms', 'names', 'migrate'], input.platform),
-      )} (comms_names_migrate from a chat) first, then add the profile again.`,
+      hint: handoffSentence(
+        handoffs.core(['names', 'migrate']),
+        (command) => `Run ${command} (comms_names_migrate from a chat) first, then add the profile again.`,
+        { instead: 'Call comms_names_migrate from a chat first, then add the profile again.' },
+      ),
     });
   }
   const organisation = input.organisation;
   const displayedPath = shownPath(file.path);
   const commandPath = displayedPath === file.path ? file.path : null;
   const previous =
-    input.mode === 'update' ? requireRecord(config, organisation, input.platform) : recordOf(config, organisation);
+    input.mode === 'update' ? requireRecord(config, organisation, handoffs) : recordOf(config, organisation);
   if (input.mode === 'add' && previous) {
     throw new CommsError('CONFIG', `the organisation profile "${organisation}" has already been added here`, {
       hint:
         commandPath === null
-          ? `To read it again, run ${inlineCommand(
-              shellCommand(['agentcomms', 'org', 'update', organisation], input.platform),
-            )}; the source file shown here is ${displayedPath}. Its path is not repeated in a command because it contains text this output neutralises.`
-          : `To read it again, run ${inlineCommand(
-              shellCommand(['agentcomms', 'org', 'update', organisation], input.platform),
-            )}; to read it from this file from now on, add ${inlineCommand(
-              shellCommand(['--source', commandPath], input.platform),
-            )}.`,
+          ? handoffSentence(
+              handoffs.core(['org', 'update', organisation]),
+              (command) =>
+                `To read it again, run ${command}; the source file shown here is ${displayedPath}. Its path is not repeated in a command because it contains text this output neutralises.`,
+              {
+                instead: `To read it again, call comms_org_update from a chat; the source file shown here is ${displayedPath}.`,
+              },
+            )
+          : // The file as `--source` of a whole command, never `--source <file>` on its own: an option is not a command.
+            handoffSentence(
+              handoffs.core(['org', 'update', organisation]),
+              (again) =>
+                handoffSentence(
+                  handoffs.core(['org', 'update', organisation, '--source', commandPath]),
+                  (fromFile) =>
+                    `To read it again, run ${again}; to read it from this file from now on, run ${fromFile}.`,
+                ),
+              { instead: 'To read it again, call comms_org_update from a chat, with this file as its source.' },
+            ),
     });
   }
   if (profile.organisation !== organisation) {
@@ -403,9 +478,11 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
         hint:
           commandPath === null
             ? `It is a different profile. Its file shown here is ${displayedPath}. Its path is not repeated in a command because it contains text this output neutralises.`
-            : `It is a different profile: add it with ${inlineCommand(
-                shellCommand(['agentcomms', 'org', 'add', commandPath], input.platform),
-              )}.`,
+            : handoffSentence(
+                handoffs.core(['org', 'add', commandPath]),
+                (command) => `It is a different profile: add it with ${command}.`,
+                { instead: 'It is a different profile: add it with comms_org_add from a chat.' },
+              ),
       },
     );
   }
@@ -575,16 +652,27 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
        */
       const row = own(config.clients, target.name);
       const stored = row ? await input.readSecret(row.secretRef) : null;
-      const fix = `to use the profile's, see ${inlineCommand(
-        shellCommand(['agent-gmail', 'client', 'add', '--help'], input.platform),
-      )}; use its client file with ${inlineCommand(
-        shellCommand(['--name', target.name, '--replace'], input.platform),
-      )}`;
+      /*
+       * Gmail's `client add`, whole, with the client file for the person to fill in — never its options on their own,
+       * which are not a command. Found among the servers registered here; with none, the tool and why (CUE-403).
+       */
+      const fix = async () =>
+        handoffSentenceToFill(
+          (await input.commands.crossProduct()).of('gmail', ['client', 'add', '--name', target.name, '--replace']),
+          ['<client-file>'],
+          (command) => `to use the profile's, register it again from its Google client file with ${command}`,
+          {
+            instead:
+              "to use the profile's, register it again from its Google client file with gmail_client_add from a chat.",
+          },
+        );
       if (stored === null) {
-        reports.push(`"${target.name}", which you registered yourself, has no secret stored on this machine; ${fix}`);
+        reports.push(
+          `"${target.name}", which you registered yourself, has no secret stored on this machine; ${await fix()}`,
+        );
       } else if (stored !== pg.clientSecret) {
         reports.push(
-          `the profile carries another secret for "${target.name}", which you registered yourself and which is left as it is; ${fix}`,
+          `the profile carries another secret for "${target.name}", which you registered yourself and which is left as it is; ${await fix()}`,
         );
       }
     }
@@ -625,15 +713,13 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
       );
     } else if (state !== 'ok') {
       const users = mailboxesOn(config, generation.name);
+      const gmail = active !== null && users.length > 0 ? await input.commands.crossProduct() : null;
       const move =
-        active !== null && users.length > 0
-          ? `; move ${users.join(', ')} onto "${active}" with ${users
-              .map((mailbox) =>
-                inlineCommand(
-                  shellCommand(['agent-gmail', 'inbox', 'reauth', mailbox, '--client', active], input.platform),
-                ),
-              )
-              .join(' and ')}`
+        active !== null && gmail !== null
+          ? `; move ${users.join(', ')} onto "${active}" ${withEach(
+              users.map((mailbox) => gmail.of('gmail', ['inbox', 'reauth', mailbox, '--client', active])),
+              'gmail_inbox_reauth',
+            )}`
           : '';
       reports.push(
         generation.ownership === 'adopted'
@@ -676,9 +762,10 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
         'CONFIG',
         `the profile moves to another Slack workspace, and ${provenance.join(', ')} ${provenance.length === 1 ? 'is' : 'are'} connected through its apps`,
         {
-          hint: `Remove them with ${provenance
-            .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', name], input.platform)))
-            .join(' and ')} first, then run the update again.`,
+          hint: `Remove them ${withEach(
+            await slackFor(input.commands, provenance, ['workspace', 'remove']),
+            'slack_workspace_remove',
+          )} first, then run the update again.`,
         },
       );
     }
@@ -720,19 +807,12 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
           was &&
           (!now || now.clientId !== was.clientId || (now.appId !== undefined && now.appId !== was.appId))
         ) {
-          const reauth = affected
-            .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'reauth', name], input.platform)))
-            .join(' and ');
-          const mode = affected
-            .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'mode', name], input.platform)))
-            .join(' and ');
-          const remove = affected
-            .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', name], input.platform)))
-            .join(' and ');
+          const on = (words: readonly string[], tool: string) =>
+            slackFor(input.commands, affected, words).then((handoffs) => withEach(handoffs, tool));
           reports.push(
             now
-              ? `${affected.join(', ')} ${affected.length === 1 ? 'is' : 'are'} on the old ${role} app: ${reauth} ${affected.length === 1 ? 'signs' : 'sign'} in through the new one`
-              : `${affected.join(', ')} ${affected.length === 1 ? 'is' : 'are'} on the ${role} app the profile no longer lists: move with ${mode} to the other app, or remove with ${remove}`,
+              ? `${affected.join(', ')} ${affected.length === 1 ? 'is' : 'are'} on the old ${role} app: sign ${affected.length === 1 ? 'it' : 'them'} in through the new one ${await on(['workspace', 'reauth'], 'slack_workspace_reauth')}`
+              : `${affected.join(', ')} ${affected.length === 1 ? 'is' : 'are'} on the ${role} app the profile no longer lists: move to the other app ${await on(['workspace', 'mode'], 'slack_mode_set')}, or remove ${await on(['workspace', 'remove'], 'slack_workspace_remove')}`,
           );
         }
       }
@@ -876,6 +956,7 @@ function profileChange(
   },
 ): GatedChange<OrgChangeResult> {
   let planned: Planned | null = null;
+  const commands = orgHandoffs(core, options.platform);
   /*
    * Whether this change turned `forOtherAddresses` off on an earlier call of its own — the call at a terminal that
    * prepared what it now claims. The claim plans from a record that is off already, and must still bind, and report,
@@ -891,6 +972,7 @@ function profileChange(
       const chosen = await chooseSecretStore(config, spec.store, {
         keyring: options.keyring,
         platform: options.platform,
+        handoffs: commands.handoffs,
       });
       if (chosen.choosing) profilePlan.needsApproval = true;
       return chosen.store;
@@ -913,7 +995,7 @@ function profileChange(
       forOtherAddresses: spec.forOtherAddresses,
       adopt: spec.adopt,
       now,
-      platform: options.platform,
+      commands,
       readSecret: async (ref) => (committed === null ? null : (await core.secrets(committed)).get(ref)),
     });
   };
@@ -969,7 +1051,7 @@ function profileChange(
     apply: async (consent) => {
       if (planned === null)
         throw new CommsError('UNEXPECTED', 'the organisation profile was applied before it was planned');
-      return applyProfile(core, options, spec.mode, planned, consent);
+      return applyProfile(core, options, spec.mode, planned, consent, commands);
     },
   };
 }
@@ -1075,7 +1157,9 @@ async function applyProfile(
   mode: 'add' | 'update',
   planned: Planned,
   consent: LooseningConsent | undefined,
+  commands: OrgHandoffs,
 ): Promise<OrgChangeResult> {
+  const { handoffs } = commands;
   const { plan, file, store } = planned;
   const { organisation } = plan;
   const narrowing = planned.narrowed ? ['for other addresses: on → off'] : [];
@@ -1089,6 +1173,7 @@ async function applyProfile(
         reason: organisation,
       });
     }
+    const after = await core.config.load();
     return {
       organisation,
       changed: changed || planned.narrowed,
@@ -1096,7 +1181,7 @@ async function applyProfile(
       reported: plan.reports,
       gmail: plan.gmail,
       store: plan.secret ? store : null,
-      profile: viewOf(await core.config.load(), organisation, options.platform),
+      profile: viewOf(after, organisation, await viewHandoffs(commands, after, [organisation])),
     };
   };
   if (mode === 'update' && writesNothing(plan)) return done(false);
@@ -1149,12 +1234,10 @@ async function applyProfile(
         secret: profileSecret,
         commit: write,
         landed,
-        howToCheck: `Run ${inlineCommand(
-          shellCommand(['agentcomms', 'org', 'show', organisation], options.platform),
-        )}.`,
-        restoreHint: `run ${inlineCommand(
-          shellCommand(['agentcomms', 'org', 'update', organisation], options.platform),
-        )} once the store can be written to.`,
+        howToCheck: handoffSentence(handoffs.core(['org', 'show', organisation]), (command) => `Run ${command}.`, {
+          instead: 'Call comms_org_show from a chat.',
+        }),
+        restoreHint: restoreClause(handoffs.core(['org', 'update', organisation])),
       });
     } else {
       try {
@@ -1180,7 +1263,12 @@ async function applyProfile(
 export function orgAddChange(core: Core, request: OrgAddRequest, options: OrgOptions): GatedChange<OrgChangeResult> {
   // Checked before anything is read, so a word that is no store is refused before any approval is prepared.
   const store = storeWord(request.store);
-  const path = profileSourcePath(request.file, options.env, options.cwd, options.platform);
+  const path = profileSourcePath(
+    request.file,
+    options.env,
+    options.cwd,
+    handoffsFor(core, { platform: options.platform }),
+  );
   if (request.loadedProfile !== undefined && request.loadedProfile.path !== path) {
     throw new CommsError('UNEXPECTED', 'the loaded organisation profile does not match the file being added');
   }
@@ -1212,13 +1300,13 @@ export function orgUpdateChange(
   const given =
     request.source === undefined
       ? undefined
-      : profileSourcePath(request.source, options.env, options.cwd, options.platform);
+      : profileSourcePath(request.source, options.env, options.cwd, handoffsFor(core, { platform: options.platform }));
   return profileChange(core, options, {
     mode: 'update',
     organisation,
     path: (config) => {
       if (given !== undefined) return given;
-      const record = requireRecord(config, organisation, options.platform);
+      const record = requireRecord(config, organisation, handoffsFor(core, { platform: options.platform }));
       if (record.source.kind !== 'file') {
         throw new CommsError('CONFIG', `"${organisation}" was added from a source this release cannot read`, {
           hint: 'Update agent-communications, or give the profile’s file with --source <file>.',
@@ -1246,8 +1334,9 @@ interface RemovalPlan {
  * with its secret. Refused while anything uses one of its clients or its apps, and while a row still carries its mark
  * without matching its generation: left without a record, such a row would be one no command could change.
  */
-function planRemoval(config: Config, organisation: string, platform: NodeJS.Platform): RemovalPlan {
-  const record = requireRecord(config, organisation, platform);
+async function planRemoval(config: Config, organisation: string, commands: OrgHandoffs): Promise<RemovalPlan> {
+  const { handoffs } = commands;
+  const record = requireRecord(config, organisation, handoffs);
   const generations = record.gmail?.generations ?? [];
   const states = generations.map((generation) => ({
     generation,
@@ -1259,18 +1348,20 @@ function planRemoval(config: Config, organisation: string, platform: NodeJS.Plat
       mailboxesOn(config, generation.name).map((mailbox) => `${mailbox} (on "${generation.name}")`),
     );
   if (used.length > 0) {
+    // Gmail's help for moving a mailbox, never a command with a mailbox to fill in: which one is for the person.
+    const help = (await commands.crossProduct()).of('gmail', ['inbox', 'reauth', '--help'], { uses: [] });
+    const see = isCommand(help) ? `; see ${inlineCommand(help)}` : ` ${withEach([help], 'gmail_inbox_reauth')}`;
     throw new CommsError('CONFIG', `mailboxes still sign in through ${organisation}'s clients: ${used.join(', ')}`, {
-      hint: `Move each onto another client; see ${inlineCommand(
-        shellCommand(['agent-gmail', 'inbox', 'reauth', '--help'], platform),
-      )}, or remove it, then remove the profile.`,
+      hint: `Move each onto another client${see}, or remove it, then remove the profile.`,
     });
   }
   const accounts = accountsOfOrganisation(config, organisation);
   if (accounts.length > 0) {
     throw new CommsError('CONFIG', `accounts are connected through ${organisation}'s apps: ${accounts.join(', ')}`, {
-      hint: `Remove them with ${accounts
-        .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', name], platform)))
-        .join(' and ')} first, then remove the profile.`,
+      hint: `Remove them ${withEach(
+        await slackFor(commands, accounts, ['workspace', 'remove']),
+        'slack_workspace_remove',
+      )} first, then remove the profile.`,
     });
   }
   const mismatched = [
@@ -1286,9 +1377,15 @@ function planRemoval(config: Config, organisation: string, platform: NodeJS.Plat
       'CONFIG',
       `${mismatched.map((name) => `"${name}"`).join(', ')} ${mismatched.length === 1 ? 'is' : 'are'} still marked as ${organisation}'s but no longer match ${mismatched.length === 1 ? 'its' : 'their'} client`,
       {
-        hint: `Nothing was removed. Run ${inlineCommand(
-          shellCommand(['agentcomms', 'org', 'update', organisation], platform),
-        )} first: it repairs the client or clears the mark, and then the profile can be removed.`,
+        hint: `Nothing was removed. ${handoffSentence(
+          handoffs.core(['org', 'update', organisation]),
+          (command) =>
+            `Run ${command} first: it repairs the client or clears the mark, and then the profile can be removed.`,
+          {
+            instead:
+              'Call comms_org_update from a chat first: it repairs the client or clears the mark, and then the profile can be removed.',
+          },
+        )}`,
       },
     );
   }
@@ -1326,9 +1423,10 @@ export function orgRemoveChange(
 ): GatedChange<OrgRemoveResult> {
   const organisation = organisationArgument(request.organisation);
   let planned: { removal: RemovalPlan; inputs: string } | null = null;
+  const commands = orgHandoffs(core, options.platform);
   return {
-    plan: (config) => {
-      const removal = planRemoval(config, organisation, options.platform);
+    plan: async (config) => {
+      const removal = await planRemoval(config, organisation, commands);
       planned = { removal, inputs: inputsOf(config) };
       const { record } = removal;
       return {
@@ -1372,9 +1470,11 @@ export function orgRemoveChange(
               {
                 hint:
                   base.hint ??
-                  `Run ${inlineCommand(
-                    shellCommand(['agentcomms', 'doctor'], options.platform),
-                  )} to see what is wrong with the secret store, then run this again.`,
+                  handoffSentence(
+                    commands.handoffs.core(['doctor']),
+                    (command) => `Run ${command} to see what is wrong with the secret store, then run this again.`,
+                    { instead: 'Call comms_doctor from a chat to see what is wrong with the secret store.' },
+                  ),
                 cause: error,
               },
             );
@@ -1416,25 +1516,44 @@ export function orgRemoveChange(
   };
 }
 
-/** Every profile added here, as `org show` shows each. Reads only. */
+/**
+ * Every profile added here, as `org show` shows each. Reads only — the registrations too, once, when a profile has
+ * drifted: a drift's fix can name Gmail's command, which is found among them (CUE-403).
+ */
 export async function orgList(core: Core, platform: NodeJS.Platform): Promise<OrganisationView[]> {
   const config = await core.config.load();
-  return Object.keys(organisationsOf(config))
-    .sort()
-    .map((organisation) => viewOf(config, organisation, platform));
+  const organisations = Object.keys(organisationsOf(config)).sort();
+  const handoffs = await viewHandoffs(orgHandoffs(core, platform), config, organisations);
+  return organisations.map((organisation) => viewOf(config, organisation, handoffs));
 }
 
 /** One profile: its record, its generations and their mailboxes, its Slack apps, and any drift. Reads only. */
 export async function orgShow(core: Core, organisation: string, platform: NodeJS.Platform): Promise<OrganisationView> {
   const word = organisationArgument(organisation);
   const config = await core.config.load();
-  requireRecord(config, word, platform);
-  return viewOf(config, word, platform);
+  const commands = orgHandoffs(core, platform);
+  requireRecord(config, word, commands.handoffs);
+  return viewOf(config, word, await viewHandoffs(commands, config, [word]));
+}
+
+/**
+ * The handoffs a view is made with: core's own, and able to find Gmail's only when one of these profiles has drifted —
+ * the one case a view names another product's command — so a view of profiles in order reads no registrations.
+ */
+async function viewHandoffs(
+  commands: OrgHandoffs,
+  config: Config,
+  organisations: readonly string[],
+): Promise<HandoffMaker> {
+  const drifted = organisations.some(
+    (organisation) => organisationDrift(config, organisation, commands.handoffs.platform).length > 0,
+  );
+  return drifted ? commands.crossProduct() : commands.handoffs;
 }
 
 /** A record as it is shown: every string that came from a profile neutralised and on one line. */
-export function viewOf(config: Config, organisation: string, platform: NodeJS.Platform): OrganisationView {
-  const record = requireRecord(config, organisation, platform);
+export function viewOf(config: Config, organisation: string, handoffs: HandoffMaker): OrganisationView {
+  const record = requireRecord(config, organisation, handoffs);
   const active = activeGeneration(record);
   const app = (role: 'read' | 'send'): SlackAppView | null => {
     const value = record.slack?.apps[role];
@@ -1480,7 +1599,7 @@ export function viewOf(config: Config, organisation: string, platform: NodeJS.Pl
         }
       : null,
     accounts: accountsOfOrganisation(config, organisation),
-    drift: organisationDrift(config, organisation, platform),
+    drift: organisationDrift(config, organisation, handoffs),
     notes,
   };
 }

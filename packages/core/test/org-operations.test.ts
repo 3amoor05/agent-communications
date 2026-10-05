@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { type GatedChange, gatedChange } from '../src/change-flow.ts';
 import { beginChangeApproval, type PreparedChange } from '../src/changes.ts';
-import { inlineCommand, shellCommand } from '../src/cli-runtime.ts';
+import { inlineCommand, lineWithWordsToFill, shellCommand } from '../src/cli-runtime.ts';
 import type { AccountConfig, ClientConfig, Config, ConfigV2, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
+import { CORE_CALLER, cliHandoffs, type HandoffUse, isCommand } from '../src/handoffs.ts';
+import { knownClientConfigs } from '../src/mcp-clients.ts';
 import { clientSecretRef } from '../src/oauth-client-records.ts';
 import { doctor } from '../src/operations/maintenance.ts';
 import {
@@ -21,11 +23,13 @@ import {
   orgUpdateChange,
 } from '../src/operations/organisations.ts';
 import { readProfileFile, shownPath } from '../src/organisations.ts';
+import { writeManaged } from './fixtures/cli-command/trees.ts';
 import {
   clientAddReplaceAsReleased0121,
   clientRemoveAsReleased0121,
   writeAsReleased0121,
 } from './fixtures/config-v2-0.12.1.ts';
+import { assertNoBareCommand, coreInline } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -55,7 +59,11 @@ interface Machine {
 }
 
 /** A machine whose configuration is `body` at version 2, the file store chosen unless the body says otherwise. */
-function machine(body: Record<string, unknown> = { secrets: { store: 'file' } }, version: 1 | 2 = 2): Machine {
+function machine(
+  body: Record<string, unknown> = { secrets: { store: 'file' } },
+  version: 1 | 2 = 2,
+  options: { located?: boolean } = {},
+): Machine {
   const home = tempDir('comms-org-');
   const configDir = join(home, 'config');
   mkdirSync(configDir);
@@ -70,7 +78,9 @@ function machine(body: Record<string, unknown> = { secrets: { store: 'file' } },
     AGENT_COMMS_CLIENT_CLI_DIRS: '',
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  return { home, configDir, env, core: openCore({ env }), files };
+  // `located`: opened as core's own CLI and server open it, so the commands it names are located (CUE-403). Otherwise
+  // the deprecated bridge's bare names, as a package that has not given core its caller still gets them.
+  return { home, configDir, env, core: openCore(options.located ? { env, caller: CORE_CALLER } : { env }), files };
 }
 
 function profile(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -334,7 +344,8 @@ test('an already-added profile quotes its organisation and source path for the s
       assert.ok(error instanceof CommsError);
       assert.equal(
         error.hint,
-        `To read it again, run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform))}; to read it from this file from now on, add ${inlineCommand(shellCommand(['--source', path], platform))}.`,
+        // The file as `--source` of a whole command — never `--source <file>` on its own, which is not a command.
+        `To read it again, run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform))}; to read it from this file from now on, run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7', '--source', path], platform))}.`,
         platform,
       );
       return true;
@@ -1951,8 +1962,8 @@ test('an adopted client made active again is held to the profile’s secret: a r
     assert.match(
       result.reported.join('\n'),
       which === 'rotated'
-        ? /the profile carries another secret for "desktop".*agent-gmail client add --help.*--name desktop --replace/
-        : /"desktop", which you registered yourself, has no secret stored on this machine.*agent-gmail client add --help.*--name desktop --replace/,
+        ? /the profile carries another secret for "desktop".*`agent-gmail client add --name desktop --replace <client-file>`/
+        : /"desktop", which you registered yourself, has no secret stored on this machine.*`agent-gmail client add --name desktop --replace <client-file>`/,
       which,
     );
     const stored = await (await m.core.secrets('file')).get(clientSecretRef('desktop'));
@@ -1960,17 +1971,17 @@ test('an adopted client made active again is held to the profile’s secret: a r
   }
 });
 
-test('an adopted client mismatch prints help and a platform-quoted replacement fragment, never a file placeholder', async () => {
+test('an adopted client mismatch prints a whole platform-quoted command with its client file to fill in, never an option fragment', async () => {
   for (const platform of ['darwin', 'win32'] as const) {
     const m = machine({ secrets: { store: 'file' }, clients: { '7-client': personsRow(CLIENT_A, '7-client') } });
     await (await m.core.secrets('file')).set(clientSecretRef('7-client'), SECRET_B);
     writeProfile(m, profile());
     const { result } = await add(m, {}, { platform });
-    const help = inlineCommand(shellCommand(['agent-gmail', 'client', 'add', '--help'], platform));
-    const flags = inlineCommand(shellCommand(['--name', '7-client', '--replace'], platform));
+    const command = shellCommand(['agent-gmail', 'client', 'add', '--name', '7-client', '--replace'], platform);
     const report = result.reported.join('\n');
-    assert.match(report, new RegExp(help.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), platform);
-    assert.match(report, new RegExp(flags.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), platform);
+    assert.ok(report.includes(`\`${lineWithWordsToFill(command, '<client-file>')}\``), `${platform}: ${report}`);
+    // `--name 7-client --replace` on its own was printed as if it were a command (CUE-403, D5).
+    assert.doesNotMatch(report, /with `--name/, platform);
     assert.doesNotMatch(report, /<its client file>/, platform);
   }
 });
@@ -2130,4 +2141,178 @@ test('no profile text can make a preview claim something was done at once: a lab
   stored.change.doneAtOnce = ['for other addresses: on → off'];
   writeFileSync(file, JSON.stringify(stored));
   await assert.rejects(beginChangeApproval(m.core, approvalId, { surface: 'cli' }), is('BAD_DATA'));
+});
+
+// ── What a profile names, located (CUE-403) ─────────────────────────────────────────────────────────────────────
+
+/** Registers these servers with Claude Code in this machine's home: each run from the entry given. */
+function register(m: Machine, servers: Record<string, string>): void {
+  const claude = knownClientConfigs(m.env, process.platform).find((file) => file.client === 'claude-code');
+  assert.ok(claude !== undefined);
+  const entries = Object.entries(servers).map(([name, entry]) => [name, { command: '/n', args: [entry, 'mcp'] }]);
+  writeFileSync(claude.path, JSON.stringify({ mcpServers: Object.fromEntries(entries) }));
+}
+
+/** The command `channel`'s CLI is run with here, as core finds it among this machine's registrations. */
+async function registeredCommand(
+  m: Machine,
+  channel: string,
+  words: readonly string[],
+  use?: HandoffUse,
+): Promise<string> {
+  const handoffs = await cliHandoffs({ caller: CORE_CALLER, paths: m.core.paths, env: m.env }).registered();
+  const handoff = handoffs.of(channel, words, use);
+  assert.ok(isCommand(handoff), 'message' in handoff ? handoff.message : '');
+  return inlineCommand(handoff);
+}
+
+/** A Slack account connected through the profile's send app. */
+function slackAccount(): AccountConfig {
+  return {
+    id: 'acc_AAAAAAAAAAAAAAAA',
+    platform: 'slack',
+    workspace: 'TACME0001',
+    userId: 'U1',
+    tier: 'read',
+    mode: 'read',
+    grantedScopes: [],
+    secretRef: 'slack:token:acc_AAAAAAAAAAAAAAAA',
+    createdAt: CREATED,
+    organisation: 'acme',
+    profileApp: 'send',
+  } as AccountConfig;
+}
+
+test("core's own commands in a profile's refusals are located; another product's are never invented (7d-core)", async () => {
+  const m = machine(undefined, 2, { located: true });
+  // Core's own: `org add --help` for none added, `org update` for one added already, with `--source` in a whole command.
+  await assert.rejects(orgShow(m.core, 'acme', process.platform), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.equal(
+      error.hint,
+      `Add one with ${coreInline(m.core.paths, ['org', 'add', '--help'], process.platform, { uses: [] })}.`,
+    );
+    return true;
+  });
+  const path = writeProfile(m, profile());
+  await add(m);
+  await assert.rejects(add(m), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.equal(
+      error.hint,
+      `To read it again, run ${coreInline(m.core.paths, ['org', 'update', 'acme'])}; to read it from this file from now on, run ${coreInline(m.core.paths, ['org', 'update', 'acme', '--source', path])}.`,
+    );
+    assertNoBareCommand(error.hint ?? '');
+    return true;
+  });
+});
+
+test("a profile names Gmail's commands only as this machine's registrations find them: a report, a drift, a refusal (7d-core)", async () => {
+  const m = machine(undefined, 2, { located: true });
+  writeProfile(m, profile());
+  await add(m);
+  writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
+  await update(m);
+  await edit(m, (raw) => {
+    delete raw.clients['acme-1'];
+    raw.inboxes = { 'acme/gmail': mailbox('acme-1') };
+  });
+  // A second machine whose mailbox still signs in through the profile's client, so its removal is refused.
+  const signedIn = machine(undefined, 2, { located: true });
+  writeProfile(signedIn, profile());
+  await add(signedIn);
+  await edit(signedIn, (raw) => {
+    raw.inboxes = { 'acme/gmail': mailbox('acme-1') };
+  });
+
+  // Nothing registered: the tool that does it from a chat, and why there is no command — never a bare `agent-gmail`.
+  const unregistered = (await update(m)).result.reported.join('\n');
+  assert.match(
+    unregistered,
+    /move acme\/gmail onto "acme-2" with gmail_inbox_reauth from a chat \(Gmail \S+ \(@agentcomms\/gmail\) is not locatable here: /,
+  );
+  assertNoBareCommand(unregistered);
+  const drift = (await orgShow(m.core, 'acme', process.platform)).drift.map((entry) => entry.fix).join('\n');
+  assert.match(drift, /Move acme\/gmail onto "acme-2" with gmail_inbox_reauth from a chat \(Gmail /);
+  assertNoBareCommand(drift);
+  await assert.rejects(remove(signedIn), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.match(error.hint ?? '', /^Move each onto another client with gmail_inbox_reauth from a chat \(Gmail /);
+    assertNoBareCommand(error.hint ?? '');
+    return true;
+  });
+
+  // Registered with a client here, from a managed runtime: that runtime's CLI, pinned to this machine's folders.
+  for (const each of [m, signedIn]) register(each, { gmail: writeManaged(each.core.paths.dataDir, 'gmail').entry });
+  const move = await registeredCommand(m, 'gmail', ['inbox', 'reauth', 'acme/gmail', '--client', 'acme-2']);
+  const entry = join(m.core.paths.dataDir, 'runtime');
+  assert.ok(move.includes(` ${entry}`) || move.includes(` ${realpathSync(entry)}`), move);
+  const registered = (await update(m)).result.reported.join('\n');
+  assert.ok(registered.includes(`move acme/gmail onto "acme-2" with ${move}`), registered);
+  assertNoBareCommand(registered);
+  const located = (await orgShow(m.core, 'acme', process.platform)).drift.map((entry) => entry.fix).join('\n');
+  assert.ok(located.includes(`Move acme/gmail onto "acme-2" with ${move}.`), located);
+  // `--help` opens no folder, so it is pinned to none.
+  const help = await registeredCommand(signedIn, 'gmail', ['inbox', 'reauth', '--help'], { uses: [] });
+  assert.doesNotMatch(help, /--config-dir/);
+  await assert.rejects(remove(signedIn), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.ok(error.hint?.startsWith(`Move each onto another client; see ${help}, or remove it`), error.hint);
+    return true;
+  });
+});
+
+test("a profile names Slack's commands only as this machine's registrations find them (7d-core)", async () => {
+  const m = machine(undefined, 2, { located: true });
+  writeProfile(m, profile());
+  await add(m);
+  await edit(m, (raw) => {
+    raw.accounts = { 'acme/slack': slackAccount() };
+  });
+  const elsewhere = profile({
+    slack: { workspace: 'TOTHER01', workspaceName: 'Other', redirectPort: 51234, apps: {} },
+  });
+  const dropsSend = profile({
+    slack: {
+      workspace: 'TACME0001',
+      workspaceName: 'Acme Test Org',
+      redirectPort: 51234,
+      apps: { read: { clientId: '1111.2222' } },
+    },
+  });
+
+  writeProfile(m, elsewhere);
+  await assert.rejects(update(m), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.match(
+      error.hint ?? '',
+      /^Remove them with slack_workspace_remove from a chat \(Slack \S+ \(@agentcomms\/slack\) is not locatable here: .*\) first, then run the update again\.$/,
+    );
+    assertNoBareCommand(error.hint ?? '');
+    return true;
+  });
+  writeProfile(m, dropsSend);
+  const unregistered = (await update(m)).result.reported.join('\n');
+  assert.match(
+    unregistered,
+    /move to the other app with slack_mode_set from a chat \(Slack .*\), or remove with slack_workspace_remove from a chat \(Slack /,
+  );
+  assertNoBareCommand(unregistered);
+
+  const { entry } = writeManaged(m.core.paths.dataDir, 'slack');
+  register(m, { slack: entry });
+  const removeIt = await registeredCommand(m, 'slack', ['workspace', 'remove', 'acme/slack']);
+  const mode = await registeredCommand(m, 'slack', ['workspace', 'mode', 'acme/slack']);
+  writeProfile(m, profile());
+  await update(m);
+  writeProfile(m, elsewhere);
+  await assert.rejects(update(m), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.equal(error.hint, `Remove them with ${removeIt} first, then run the update again.`);
+    return true;
+  });
+  writeProfile(m, dropsSend);
+  const registered = (await update(m)).result.reported.join('\n');
+  assert.ok(registered.includes(`move to the other app with ${mode}, or remove with ${removeIt}`), registered);
+  assertNoBareCommand(registered);
 });

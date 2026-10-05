@@ -24,7 +24,7 @@ import { renderDoctor } from '../src/render.ts';
 import type { SecretStore } from '../src/secrets.ts';
 import { VERSION } from '../src/version.ts';
 import { pinArgs, registration, writeManaged } from './fixtures/cli-command/trees.ts';
-import { assertNoBareCommand, coreHandoffs, coreInline, locatedCoreLine } from './helpers/handoffs.ts';
+import { assertNoBareCommand, coreCommand, coreHandoffs, coreInline, locatedCoreLine } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -204,7 +204,9 @@ test('a loosening refused by the store names both ways to approve it: from a cha
       assert.equal(error.code, 'LOOSENING_REFUSED');
       assert.match(error.hint ?? '', /chat/, 'the chat route');
       assert.match(error.hint ?? '', /approval id/, '…which is a tool returning an approval id');
-      assert.match(error.hint ?? '', /agentcomms approve/, 'the terminal route under confirm');
+      // The terminal route under confirm, as the command each result gives — never a CLI named here (CUE-403).
+      assert.match(error.hint ?? '', /runs the approve command the result gives at their own terminal/);
+      assertNoBareCommand(error.hint ?? '', 'the loosening hint');
       assert.match(error.hint ?? '', /terminal/);
       assert.doesNotMatch(error.hint ?? '', /Only a person at a terminal/, 'not the terminal alone');
       return true;
@@ -280,11 +282,35 @@ test('the greeting says how a change is approved, names the policy in force, and
       const greeting = client.getInstructions() ?? '';
       assert.ok(Buffer.byteLength(greeting) < 2048, `${Buffer.byteLength(greeting)} bytes; Claude Code keeps 2,048`);
       assert.match(greeting, /approvalRequired/);
-      assert.match(greeting, /agentcomms approve <approvalId>/);
+      assert.match(greeting, /they first run the approve command the result gives, in their\nown terminal/);
+      assertNoBareCommand(greeting, 'the greeting');
       assert.match(greeting, /you cannot approve it for them/);
       assert.match(greeting, new RegExp(`The default change policy here is ${changePolicy}\\.`));
       assert.match(greeting, /restarted/, 'the last line survives too');
       assert.match(greeting, /comms_update with `check`/, 'an agent learns it can see what is behind');
+    } finally {
+      await close();
+    }
+  }
+});
+
+test('the greeting and every tool say to run the command a result gives, and name no CLI of their own (7d-core)', async () => {
+  /*
+   * A greeting or a description is written once, for every machine; the command that runs here is not the same on any
+   * two (CUE-403). So they say what to do — run the approve command the result gives — and the result carries the
+   * command, located where it is printed.
+   */
+  for (const changePolicy of ['chat', 'confirm'] as const) {
+    const m = machine({ defaults: { changePolicy } });
+    const { client, close } = await connect(m);
+    try {
+      assertNoBareCommand(client.getInstructions() ?? '', 'the greeting');
+      const { tools } = await client.listTools();
+      assert.ok(tools.length > 10, `${tools.length} tools`);
+      for (const tool of tools) {
+        assertNoBareCommand(tool.description ?? '', `${tool.name}'s description`);
+        assertNoBareCommand(JSON.stringify(tool.inputSchema), `${tool.name}'s arguments`);
+      }
     } finally {
       await close();
     }
@@ -681,8 +707,15 @@ test('change-policy repair commands use the selected shell platform', async () =
     defaults: { changePolicy: 'confirm' },
     accounts: { '7/slack': account({ changePolicy: 'chat' }) },
   });
+  // A bare platform is the bridge's bare command, as before CUE-403, quoted for that shell.
   const report = changePolicyReport(await m.core.config.load(), {}, 'win32');
   assert.equal(report.looser?.[0]?.tighten.command, 'agentcomms policy --account "7/slack" confirm');
+  // Core's own handoffs, for that shell: its located command, quoted the same way.
+  const located = changePolicyReport(await m.core.config.load(), {}, coreHandoffs(m.core.paths, 'win32'));
+  const command = coreCommand(m.core.paths, ['policy', '--account', '7/slack', 'confirm'], 'win32');
+  assert.equal(located.looser?.[0]?.tighten.command, command);
+  assert.ok(command.endsWith(' policy --account "7/slack" confirm'), command);
+  assertNoBareCommand(command);
 });
 
 test('the change policy: reported the same by the tool and the command, tightened at once', async () => {
@@ -741,13 +774,15 @@ test('tightening the default says which mailboxes and workspaces still approve i
     assert.equal((await ok('comms_change_policy', { inbox: 'acme/gmail', set: 'chat' })).applied, true);
     assert.equal((await ok('comms_change_policy')).looser, undefined, 'a chat default has nothing to warn of');
 
-    // At a terminal: the warning, in words, with a command for each.
+    // At a terminal: the warning, in words, with a command for each — core's own, located (CUE-403).
+    const tighten = (flag: string, name: string) => coreCommand(m.core.paths, ['policy', flag, name, 'confirm']);
     const byCommand = cli(m, ['policy', 'confirm'], { CLAUDECODE: '1' });
     assert.equal(byCommand.status, 0, byCommand.stderr);
     assert.match(byCommand.stdout, /Default change policy: confirm/);
     assert.match(byCommand.stdout, /Warning: .*2 .*still approve .* in the chat/);
-    assert.match(byCommand.stdout, /\n {2}agentcomms policy --inbox acme\/gmail confirm\n/);
-    assert.match(byCommand.stdout, /\n {2}agentcomms policy --account acme\/slack confirm(\n|$)/);
+    assert.ok(byCommand.stdout.includes(`\n  ${tighten('--inbox', 'acme/gmail')}\n`), byCommand.stdout);
+    assert.ok(byCommand.stdout.includes(`\n  ${tighten('--account', 'acme/slack')}`), byCommand.stdout);
+    assertNoBareCommand(byCommand.stdout);
 
     // From chat: the same list, with the call that tightens each.
     const tightened = (await ok('comms_change_policy', { set: 'confirm' })) as { result: Record<string, unknown> };
@@ -758,7 +793,7 @@ test('tightening the default says which mailboxes and workspaces still approve i
         name: 'acme/gmail',
         changePolicy: 'chat',
         tighten: {
-          command: 'agentcomms policy --inbox acme/gmail confirm',
+          command: tighten('--inbox', 'acme/gmail'),
           tool: 'comms_change_policy',
           arguments: { inbox: 'acme/gmail', set: 'confirm' },
         },
@@ -768,7 +803,7 @@ test('tightening the default says which mailboxes and workspaces still approve i
         name: 'acme/slack',
         changePolicy: 'chat',
         tighten: {
-          command: 'agentcomms policy --account acme/slack confirm',
+          command: tighten('--account', 'acme/slack'),
           tool: 'comms_change_policy',
           arguments: { account: 'acme/slack', set: 'confirm' },
         },

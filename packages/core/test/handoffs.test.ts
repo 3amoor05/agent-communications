@@ -1,17 +1,27 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { sendApprovesHint } from '../src/approvals.ts';
 import { beginChangeApproval, claimChange } from '../src/changes.ts';
 import type { NodeRuntime } from '../src/cli-command.ts';
-import { commandText, inlineCommand, type ShellCommand, shellCommand } from '../src/cli-runtime.ts';
+import {
+  commandText,
+  inlineCommand,
+  lineWithWordsToFill,
+  type ShellCommand,
+  shellCommand,
+} from '../src/cli-runtime.ts';
+import { parseConfig, secretsStoreFor } from '../src/config.ts';
 import { openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import {
   CORE_CALLER,
   cliHandoffs,
   type Handoff,
+  type HandoffMaker,
   handoffChoices,
   handoffSentence,
   handoffSentenceToFill,
@@ -21,11 +31,21 @@ import {
   registeredFor,
   requireHandoffs,
 } from '../src/handoffs.ts';
+import { checkAttachable } from '../src/jail.ts';
 import { knownClientConfigs } from '../src/mcp-clients.ts';
+import { profileSourcePath, resolveProfileSlackTarget } from '../src/organisations.ts';
 import type { ResolvedPaths } from '../src/paths.ts';
+import { FileSecretStore, KeychainSecretStore, type KeyringModule } from '../src/secrets.ts';
 import { VERSION as CORE_VERSION } from '../src/version.ts';
-import { moduleUrl, realTemp, registration, writeCheckout, writeManaged } from './fixtures/cli-command/trees.ts';
-import { assertNoBareCommand, coreInline } from './helpers/handoffs.ts';
+import {
+  moduleUrl,
+  realTemp,
+  registration,
+  writeCheckout,
+  writeGlobal,
+  writeManaged,
+} from './fixtures/cli-command/trees.ts';
+import { assertNoBareCommand, coreHandoffs, coreInline } from './helpers/handoffs.ts';
 
 /*
  * The API a package tells a person what to run with (CONTRIBUTING.md, "Telling a person what to run"): made once from
@@ -234,6 +254,27 @@ test('openCore gives core its handoffs from a caller, and core’s own CLI and s
   );
 });
 
+test('openCore hands its handoffs to the stores it makes: their refusals name core’s command, located', async () => {
+  const home = realTemp('home-');
+  const env = { HOME: home, USERPROFILE: home, AGENT_COMMS_CONFIG_DIR: join(home, 'config') };
+  const core = openCore({ env, caller: CORE_CALLER });
+  // A secret's file that cannot be read, in the store core opens.
+  mkdirSync(join(core.paths.secretsDir, `${createHash('sha256').update('ref').digest('hex').slice(0, 32)}.json`), {
+    recursive: true,
+  });
+  await assert.rejects((await core.secrets('file')).get('ref'), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.equal(
+      error.hint,
+      `Run ${coreInline(core.paths, ['doctor'])}. Re-authorise the inbox if the file is damaged.`,
+    );
+    return true;
+  });
+  // The configuration store: its refusals are made where no `core` is in reach, so it is given the handoffs.
+  const source = readFileSync(fileURLToPath(new URL('../src/core.ts', import.meta.url)), 'utf8');
+  assert.match(source, /new ConfigStore\(paths\.configDir, \{ handoffs \}\)/);
+});
+
 // ── 7d (core): a misdirected approval is corrected with commands that run, or with why there is none ────────────────
 
 /** A machine whose Claude Code has a managed Gmail of this release registered, and core opened as core. */
@@ -299,4 +340,141 @@ test("a change's approval offered as a send is approved with this installation's
     );
     return true;
   });
+});
+
+/*
+ * The deep refusals — the attachment jail, the secret stores, the configuration's one store, a profile's guards — are
+ * made where no `core` is in reach, so each is handed the printing package's handoffs (`HandoffsOrPlatform`, or an
+ * option). Given core's own, they name its command located; given a maker with no command, the other way and why; given
+ * a bare platform, or nothing, the bridge's bare command, as a channel that has not given core its caller still prints.
+ */
+test("core's deep refusals name core's command from the handoffs they are given, or why there is none (7d-core)", async () => {
+  const located = coreHandoffs(PATHS, 'linux');
+  const { handoffs: gmail } = gmailHandoffs();
+  const why = gmail.of('slack', ['doctor']);
+  assert.ok(!isCommand(why));
+  const nowhere: HandoffMaker = { platform: 'linux', own: () => why, core: () => why, of: () => why };
+  const command = (words: readonly string[]) => coreInline(PATHS, words, 'linux');
+  const hintOf = async (attempt: () => unknown): Promise<string> => {
+    try {
+      await attempt();
+    } catch (error) {
+      assert.ok(error instanceof CommsError, String(error));
+      return error.hint ?? '';
+    }
+    assert.fail('it was not refused');
+  };
+
+  // The jail: a file from outside every allowed folder.
+  const home = realTemp('jail-');
+  const allowed = join(home, 'allowed');
+  mkdirSync(allowed);
+  const outside = join(home, 'outside.txt');
+  writeFileSync(outside, 'x');
+  const policy = { roots: [allowed], deny: [], home };
+  const copy =
+    'Copy the file under your home folder — not into one of its hidden folders — and name the copy instead, or';
+  const attachRootsAdd = located.core(['attach', 'roots', 'add']);
+  assert.ok(isCommand(attachRootsAdd));
+  assert.equal(
+    await hintOf(() => checkAttachable(outside, { ...policy, handoffs: located })),
+    `${copy} allow its folder with \`${lineWithWordsToFill(attachRootsAdd, '<folder>')}\` (needs your approval).`,
+  );
+  assert.equal(
+    await hintOf(() => checkAttachable(outside, { ...policy, handoffs: nowhere })),
+    `${copy} allow its folder with comms_attach from a chat (needs your approval). ${why.message}`,
+  );
+  assert.equal(
+    await hintOf(() => checkAttachable(outside, policy)),
+    `${copy} allow its folder with \`agentcomms attach roots add <folder>\` (needs your approval).`,
+  );
+
+  // The file store: a secret's file that cannot be read.
+  const secrets = realTemp('secrets-');
+  mkdirSync(join(secrets, `${createHash('sha256').update('ref').digest('hex').slice(0, 32)}.json`));
+  assert.equal(
+    await hintOf(() => new FileSecretStore(secrets, { handoffs: located }).get('ref')),
+    `Run ${command(['doctor'])}. Re-authorise the inbox if the file is damaged.`,
+  );
+  assert.equal(
+    await hintOf(() => new FileSecretStore(secrets, { handoffs: nowhere }).get('ref')),
+    `Call comms_doctor from a chat. ${why.message} Re-authorise the inbox if the file is damaged.`,
+  );
+  assert.equal(
+    await hintOf(() => new FileSecretStore(secrets).get('ref')),
+    'Run `agentcomms doctor`. Re-authorise the inbox if the file is damaged.',
+  );
+
+  // The keychain, refusing.
+  const refusing: KeyringModule = {
+    AsyncEntry: class {
+      getPassword(): Promise<string | undefined> {
+        return Promise.reject(new Error('locked'));
+      }
+      setPassword(): Promise<void> {
+        return Promise.reject(new Error('locked'));
+      }
+      deletePassword(): Promise<boolean> {
+        return Promise.reject(new Error('locked'));
+      }
+    },
+  };
+  assert.equal(
+    await hintOf(() => new KeychainSecretStore(refusing, 'ns', 1000, { handoffs: located }).get('ref')),
+    `Unlock the keychain and retry. Run ${command(['doctor'])} for details. On macOS a Node upgrade can require allowing access again.`,
+  );
+
+  // The one store the configuration keeps its secrets in, asked for another.
+  const keychain = parseConfig(JSON.stringify({ version: 2, secrets: { store: 'keychain' } }), 'config.json');
+  const oneStore = 'Everything here uses one store, and changing it moves what is already stored.';
+  assert.equal(
+    await hintOf(() => secretsStoreFor(keychain, 'file', located)),
+    `${oneStore} To change it, run ${command(['secrets', 'migrate', '--to', 'file'])}, then run this again.`,
+  );
+  assert.equal(
+    await hintOf(() => secretsStoreFor(keychain, 'file', nowhere)),
+    `${oneStore} To change it, call comms_secrets_migrate from a chat, then run this again. ${why.message}`,
+  );
+  assert.equal(
+    await hintOf(() => secretsStoreFor(keychain, 'file', 'linux')),
+    `${oneStore} To change it, run \`agentcomms secrets migrate --to file\`, then run this again.`,
+  );
+
+  // A profile's guards: no file named, and a Slack sign-in for a profile that is not there.
+  assert.equal(
+    await hintOf(() => profileSourcePath('', {}, '/work', located)),
+    `For example: ${command(['org', 'add', './rgc.agentcomms.json'])}.`,
+  );
+  assert.equal(
+    await hintOf(() => resolveProfileSlackTarget(keychain, 'acme', 'read', located)),
+    `Run ${command(['org', 'update', 'acme'])} to reconcile the profile, then start the sign-in again.`,
+  );
+  assert.equal(
+    await hintOf(() => resolveProfileSlackTarget(keychain, 'acme', 'read', nowhere)),
+    `Call comms_org_update from a chat to reconcile the profile, then start the sign-in again. ${why.message}`,
+  );
+  assert.equal(
+    await hintOf(() => resolveProfileSlackTarget(keychain, 'acme', 'read', 'linux')),
+    'Run `agentcomms org update acme` to reconcile the profile, then start the sign-in again.',
+  );
+});
+
+test('a correction found from a Windows registration in another case names the located command, never that name (7d-core)', () => {
+  const temp = realTemp();
+  // Gmail installed globally on Windows, registered by its command as Windows wrote it: another case, `.CMD`.
+  const mixed = writeGlobal(join(temp, 'prefix'), 'gmail', { windows: true, command: 'Agent-Gmail.CMD' });
+  const handoffs = cliHandoffs({
+    caller: CORE_CALLER,
+    paths: PATHS,
+    platform: 'win32',
+    runtime: NODE,
+  }).withRegistrations([registration({ command: mixed.command, args: ['mcp'] })]);
+  const gmail = handoffs.of('gmail', ['approve', 'ap_1']);
+  assert.ok(isCommand(gmail), 'message' in gmail ? gmail.message : '');
+  assert.deepEqual(gmail.words.slice(2), [...FOUR, 'approve', 'ap_1']);
+  assert.ok(gmail.words[1]?.endsWith(join('dist', 'cli.mjs')), gmail.words[1]);
+  const hint = sendApprovesHint(handoffs, 'ap_1');
+  assert.ok(hint.startsWith(`It is approved with the command that prepared it — ${inlineCommand(gmail)} (`), hint);
+  assert.doesNotMatch(hint, /Agent-Gmail\.CMD/i);
+  assertNoBareCommand(hint);
 });

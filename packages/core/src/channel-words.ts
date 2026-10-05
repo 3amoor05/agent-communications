@@ -39,6 +39,9 @@ export function listed(words: readonly string[], conjunction: string, options: {
 /**
  * Every channel's own approve command, quoted: "`agent-gmail approve` or `agent-slack approve`".
  *
+ * @deprecated Bare names from the manifests, for the bridge alone — a package that has not given core its caller
+ * (`handoffsFor`). Located, the approve commands come from `CliHandoffs.of`; this goes with the bridge (CUE-403 task 15).
+ *
  * `sending` keeps only the channels whose accounts can be in `send`: the commands that can have prepared a send. A
  * channel that never sends — WhatsApp — has an approve command for the changes its `mcp install` and `mcp prune`
  * make, and naming it where the approval in hand is a send would send a person to a command that never prepared one.
@@ -73,10 +76,12 @@ export function narrowingOwner(option: NarrowingOption): ChannelManifest | undef
 }
 
 /**
- * The command that connects a mailbox, for a hint about there being none: the `inbox add` of the channel whose
- * accounts are mailboxes, in the `inboxes` map.
+ * How a mailbox is connected, for a hint about there being none: the `inbox add` of the channel whose accounts are
+ * mailboxes, in the `inboxes` map — named in words, "Gmail's inbox add", never as a command. Core does not have that
+ * channel's CLI, and finds it only among this machine's registrations (CUE-403); a hint made where none were read must
+ * not invent the command from the manifest's binary.
  */
-export function connectMailboxCommand(): string | undefined {
+export function connectMailboxWords(): string | undefined {
   const mail = accountChannels().find((manifest) => manifest.accounts?.map === 'inboxes');
-  return mail ? `${mail.binary} inbox add` : undefined;
+  return mail ? `${mail.label}'s inbox add` : undefined;
 }

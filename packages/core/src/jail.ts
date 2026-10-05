@@ -3,6 +3,7 @@ import { type FileHandle, open, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { isDangerous } from './chars.ts';
 import { CommsError } from './errors.ts';
+import { asHandoffMaker, type HandoffMaker, handoffSentenceToFill } from './handoff-text.ts';
 import { expandHome } from './paths.ts';
 
 /*
@@ -150,6 +151,11 @@ export interface AttachPolicy {
   roots: string[];
   deny: string[];
   home?: string;
+  /**
+   * The printing package's handoffs, for the command a refusal names (`core.handoffs`, CUE-403). Left out, it names the
+   * bare command it always has — the deprecated bridge, until every package gives core its caller.
+   */
+  handoffs?: HandoffMaker | undefined;
 }
 
 async function realOrResolved(path: string): Promise<string> {
@@ -197,12 +203,19 @@ export async function checkAttachable(path: string, policy: AttachPolicy): Promi
   if (!roots.some((root) => isInside(real, root))) {
     /*
      * What a person can do about it, and nothing they cannot. This once named a CLI command for widening the allowed
-     * folders when there was none. There is one now, `agentcomms attach roots add` (#45), and it is a change the person
+     * folders when there was none. There is one now, core's `attach roots add` (#45), and it is a change the person
      * approves, so it is named with that said; the copy under the home folder is still the step that needs nobody. The
-     * same words for a Gmail attachment, a Resend attachment and a Slack file.
+     * same words for a Gmail attachment, a Resend attachment and a Slack file, the command located from whichever is
+     * printing (CUE-403) — or, where none is, the tool that does it from a chat, and why there is no command.
      */
+    const allow = handoffSentenceToFill(
+      asHandoffMaker(policy.handoffs).core(['attach', 'roots', 'add']),
+      ['<folder>'],
+      (command) => `allow its folder with ${command} (needs your approval).`,
+      { instead: 'allow its folder with comms_attach from a chat (needs your approval).' },
+    );
     throw new CommsError('BAD_DATA', `attachments must come from an allowed folder; ${path} is outside them`, {
-      hint: 'Copy the file under your home folder — not into one of its hidden folders — and name the copy instead, or allow its folder with `agentcomms attach roots add <folder>` (needs your approval).',
+      hint: `Copy the file under your home folder — not into one of its hidden folders — and name the copy instead, or ${allow}`,
     });
   }
   const name = basename(real);

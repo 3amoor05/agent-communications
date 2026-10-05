@@ -36,12 +36,15 @@ export * from './fs.ts';
  * `core.handoffs`. See CONTRIBUTING.md, "Telling a person what to run". `CORE_CALLER` is core's own and is not here.
  */
 export {
+  asHandoffMaker,
   type CliHandoffs,
   type CliHandoffsOptions,
   cliHandoffs,
   HANDOFF_FOLDERS,
   type Handoff,
   type HandoffMaker,
+  type HandoffSentenceOptions,
+  type HandoffsOrPlatform,
   type HandoffUse,
   handoffChoices,
   handoffSentence,
@@ -49,6 +52,7 @@ export {
   handoffsFor,
   handoffText,
   isCommand,
+  platformOf,
   registeredFor,
   requireHandoffs,
   withRegistrationsFor,

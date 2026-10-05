@@ -219,7 +219,7 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
 function organisationChecks(config: Config, handoffs: HandoffMaker): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   for (const organisation of Object.keys(organisationsOf(config)).sort()) {
-    const drift = organisationDrift(config, organisation, handoffs.platform);
+    const drift = organisationDrift(config, organisation, handoffs);
     const record = organisationsOf(config)[organisation];
     const active = record?.gmail?.active ?? null;
     if (drift.length === 0) {

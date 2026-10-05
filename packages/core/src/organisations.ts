@@ -4,7 +4,7 @@ import { type FileHandle, open } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { isDangerous } from './chars.ts';
-import { inlineCommand, shellCommand } from './cli-runtime.ts';
+import type { ShellCommand } from './cli-runtime.ts';
 import type {
   ClientConfig,
   Config,
@@ -14,6 +14,14 @@ import type {
   OrganisationSlackApp,
 } from './config.ts';
 import { CommsError } from './errors.ts';
+import {
+  asHandoffMaker,
+  type Handoff,
+  type HandoffsOrPlatform,
+  handoffChoices,
+  handoffSentence,
+  isCommand,
+} from './handoff-text.ts';
 import { organisationProblem, parseName, parseOrganisation } from './name-grammar.ts';
 import { clientSecretRef, GOOGLE_CLIENT_ID_PATTERN } from './oauth-client-records.ts';
 import { expandHome, homeDirectory } from './paths.ts';
@@ -235,14 +243,16 @@ export function profileSourcePath(
   given: unknown,
   env: NodeJS.ProcessEnv,
   cwd: string | undefined,
-  platform: NodeJS.Platform,
+  handoffs: HandoffsOrPlatform,
 ): string {
   const value = typeof given === 'string' ? given : '';
   if (value.trim() === '') {
     throw new CommsError('USAGE', 'name the profile file', {
-      hint: `For example: ${inlineCommand(
-        shellCommand(['agentcomms', 'org', 'add', './rgc.agentcomms.json'], platform),
-      )}.`,
+      hint: handoffSentence(
+        asHandoffMaker(handoffs).core(['org', 'add', './rgc.agentcomms.json']),
+        (command) => `For example: ${command}.`,
+        { instead: 'Name it by its path: ./rgc.agentcomms.json, for example.' },
+      ),
     });
   }
   /*
@@ -485,7 +495,7 @@ export function requireLiveOrganisationGeneration(
   config: Config,
   organisation: string,
   generation: OrganisationGeneration,
-  platform: NodeJS.Platform = process.platform,
+  handoffs: HandoffsOrPlatform = process.platform,
 ): ClientConfig {
   const row = own(config.clients, generation.name);
   const commonMatches =
@@ -503,7 +513,12 @@ export function requireLiveOrganisationGeneration(
       'CONFIG',
       `the organisation ${organisation} cannot use its Google client "${generation.name}" because its registered row is missing or no longer matches`,
       {
-        hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', organisation], platform))} (or comms_org_update from a chat) to repair the organisation profile before signing in.`,
+        hint: handoffSentence(
+          asHandoffMaker(handoffs).core(['org', 'update', organisation]),
+          (command) =>
+            `Run ${command} (or comms_org_update from a chat) to repair the organisation profile before signing in.`,
+          { instead: 'Call comms_org_update from a chat to repair the organisation profile before signing in.' },
+        ),
       },
     );
   }
@@ -686,18 +701,32 @@ export interface OrganisationDrift {
   fix: string;
 }
 
+/**
+ * Commands — one an account, say — as "with `a` and `b`"; or, when not one is a command here, "with `tool` from a chat"
+ * and why there is none. For another product's commands, which core finds only among the servers registered here
+ * (CUE-403): a profile names Gmail's and Slack's, and this core may be installed with neither.
+ */
+export function withEach(handoffs: readonly (Handoff | ShellCommand)[], tool: string): string {
+  return handoffs.some(isCommand)
+    ? `with ${handoffChoices(handoffs, '', { conjunction: 'and' })}`
+    : `with ${tool} from a chat (${handoffChoices(handoffs, '').replace(/\.$/, '')})`;
+}
+
 /** Every drift of one organisation's record from the configuration, in a stable order. */
 export function organisationDrift(
   config: Config,
   organisation: string,
-  platform: NodeJS.Platform,
+  handoffs: HandoffsOrPlatform,
 ): OrganisationDrift[] {
   const record = recordOf(config, organisation);
   if (!record) return [];
   const drift: OrganisationDrift[] = [];
-  const update = `Run ${inlineCommand(
-    shellCommand(['agentcomms', 'org', 'update', organisation], platform),
-  )} (comms_org_update from a chat).`;
+  const maker = asHandoffMaker(handoffs);
+  const update = handoffSentence(
+    maker.core(['org', 'update', organisation]),
+    (command) => `Run ${command} (comms_org_update from a chat).`,
+    { instead: 'Call comms_org_update from a chat.' },
+  );
   const active = activeGeneration(record);
   for (const generation of record.gmail?.generations ?? []) {
     const state = generationState(config, organisation, generation);
@@ -705,18 +734,18 @@ export function organisationDrift(
     const isActive = generation === active;
     const { name } = generation;
     const users = mailboxesOn(config, name);
-    const moves = active
-      ? users.map((mailbox) =>
-          inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', mailbox, '--client', active.name], platform)),
-        )
-      : [];
+    /*
+     * Gmail's commands, which this core does not have: found among the servers registered here, when the handoffs
+     * were given them (CUE-403) — never guessed. With none found, the tool that does it from a chat, and why.
+     */
     const move =
       active && !isActive
-        ? ` Move ${users.length > 0 ? users.join(', ') : 'any mailbox on it'} onto "${active.name}" with ${
-            moves.length > 0
-              ? moves.join(' and ')
-              : inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', '--help'], platform))
-          }.`
+        ? ` Move ${users.length > 0 ? users.join(', ') : 'any mailbox on it'} onto "${active.name}" ${withEach(
+            users.length > 0
+              ? users.map((mailbox) => maker.of('gmail', ['inbox', 'reauth', mailbox, '--client', active.name]))
+              : [maker.of('gmail', ['inbox', 'reauth', '--help'], { uses: [] })],
+            'gmail_inbox_reauth',
+          )}.`
         : '';
     if (generation.ownership === 'adopted') {
       drift.push({
@@ -865,9 +894,13 @@ const profileSlackTargetSchema: z.ZodType<ProfileSlackTarget, unknown> = z.stric
   sha256: z.string().regex(/^[0-9a-f]{64}$/, 'a SHA-256 is 64 lowercase hex digits'),
 });
 
-function slackTargetProblem(organisation: string, message: string, platform: NodeJS.Platform): CommsError {
+function slackTargetProblem(organisation: string, message: string, handoffs: HandoffsOrPlatform): CommsError {
   return new CommsError('CONFIG', message, {
-    hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', organisation], platform))} to reconcile the profile, then start the sign-in again.`,
+    hint: handoffSentence(
+      asHandoffMaker(handoffs).core(['org', 'update', organisation]),
+      (command) => `Run ${command} to reconcile the profile, then start the sign-in again.`,
+      { instead: 'Call comms_org_update from a chat to reconcile the profile, then start the sign-in again.' },
+    ),
   });
 }
 
@@ -876,21 +909,21 @@ export function resolveProfileSlackTarget(
   config: Config,
   organisation: string,
   role: 'read' | 'send',
-  platform: NodeJS.Platform = process.platform,
+  handoffs: HandoffsOrPlatform = process.platform,
 ): ProfileSlackTarget {
   const record = recordOf(config, organisation);
   if (!record) {
     throw slackTargetProblem(
       organisation,
       `there is no organisation profile for ${shownText(organisation, 40)}`,
-      platform,
+      handoffs,
     );
   }
   if (!record.slack) {
     throw slackTargetProblem(
       organisation,
       `the organisation profile for ${organisation} does not list Slack`,
-      platform,
+      handoffs,
     );
   }
   const app = record.slack.apps[role];
@@ -898,7 +931,7 @@ export function resolveProfileSlackTarget(
     throw slackTargetProblem(
       organisation,
       `the organisation profile for ${organisation} does not list a ${role} app`,
-      platform,
+      handoffs,
     );
   }
   const parsed = profileSlackTargetSchema.safeParse({
@@ -916,7 +949,7 @@ export function resolveProfileSlackTarget(
     throw slackTargetProblem(
       organisation,
       `the organisation profile for ${organisation} has an invalid stored Slack target`,
-      platform,
+      handoffs,
     );
   }
   return parsed.data;
@@ -933,23 +966,23 @@ export function learnProfileSlackAppId(
   config: Config,
   expected: ProfileSlackTarget,
   appId: string,
-  platform: NodeJS.Platform = process.platform,
+  handoffs: HandoffsOrPlatform = process.platform,
 ): Config {
   if (!SLACK_APP_ID_PATTERN.test(appId)) {
     throw slackTargetProblem(
       expected.organisation,
       'Slack returned an invalid app id for the profile sign-in',
-      platform,
+      handoffs,
     );
   }
   let live: ProfileSlackTarget;
   try {
-    live = resolveProfileSlackTarget(config, expected.organisation, expected.role, platform);
+    live = resolveProfileSlackTarget(config, expected.organisation, expected.role, handoffs);
   } catch {
     throw slackTargetProblem(
       expected.organisation,
       `the organisation profile changed during the Slack sign-in`,
-      platform,
+      handoffs,
     );
   }
   const stable = (target: ProfileSlackTarget) => ({
@@ -966,14 +999,14 @@ export function learnProfileSlackAppId(
     throw slackTargetProblem(
       expected.organisation,
       `the organisation profile changed during the Slack sign-in`,
-      platform,
+      handoffs,
     );
   }
   if (expected.appId !== undefined && live.appId !== expected.appId) {
     throw slackTargetProblem(
       expected.organisation,
       `the organisation profile changed during the Slack sign-in`,
-      platform,
+      handoffs,
     );
   }
   if (live.appId !== undefined) {
@@ -981,14 +1014,14 @@ export function learnProfileSlackAppId(
     throw slackTargetProblem(
       expected.organisation,
       `the ${expected.role} profile app already has another app id`,
-      platform,
+      handoffs,
     );
   }
   if (config.version !== 2) {
     throw slackTargetProblem(
       expected.organisation,
       'organisation profiles require a version-2 configuration',
-      platform,
+      handoffs,
     );
   }
   const next = structuredClone(config);
@@ -997,7 +1030,7 @@ export function learnProfileSlackAppId(
     throw slackTargetProblem(
       expected.organisation,
       `the organisation profile changed during the Slack sign-in`,
-      platform,
+      handoffs,
     );
   }
   app.appId = appId;

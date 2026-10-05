@@ -434,7 +434,7 @@ test('every sentence the core builds about a channel is byte for byte what it wa
     'registers the Slack MCP server with cursor as "slack" again',
     'it will be able to send, not only read',
     '`agent-gmail approve`, `agent-resend approve` or `agent-slack approve`',
-    'add one with `agent-gmail inbox add`',
+    "add one with Gmail's inbox add",
     'is not a Slack workspace',
     'is an option of the Gmail server; the Slack server has no such option',
   ]) {
