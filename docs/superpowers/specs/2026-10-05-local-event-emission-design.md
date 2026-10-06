@@ -1,11 +1,12 @@
 # Local event emission — design
 
-Status: **revised with the owner's answers on 2026-10-06 and for review round 20; awaiting review round 21.** The
-owner's five answers are folded into the design and listed, with where each landed, in §8. Rounds 1–18 were resolved;
-round 19's two findings are closed in D4, D8, D9 and D12, and §9 records where; round 20's three findings are closed
-in D4/D8 (WhatsApp stage expiry), D11 (runtime lock and integrity) and D11/D2 (operating-system network boundary), and
-the same stage-deadline rule now covers every source's staging, with every content-bearing deadline capped in D8's
-retention table. Specification only, not an implementation.
+Status: **revised with the owner's answers on 2026-10-06 and for review rounds 20 and 21; awaiting review round
+22.** The owner's answers and decisions are folded into the design and listed, with where each landed, in §8. Rounds
+1–18 were resolved; §9 records where the findings of rounds 19, 20 and 21 were closed: WhatsApp's replacement drain
+and list fence (D4, D8, D9, D12), stage deadlines for every source with every content-bearing deadline in D8's
+retention table, Laya's runtime lock (D11), its operating-system network boundary on macOS only (D11, D2), and
+retention tightenings that shorten every affected deadline in one transaction (D2, D8). Specification only, not an
+implementation.
 Written from the cited research pass (§2) and a checked read of this repository at `90463e1`, whose code is release
 0.13.0. The 2026-10-06 revision's new repository citations are to `6f6a9de4` (release 0.14.0) and say so; files such as
 `packages/core/src/approvals.ts` have moved since `90463e1` (the unions this design describes are unchanged), so phase
@@ -111,7 +112,7 @@ repository, registry entry or documentation; content read there was treated as d
 | Tauri can sign a macOS app ad hoc with `signingIdentity: "-"`, which needs no Apple identity and which Tauri calls useful on Apple silicon, "where code-signing is required for all apps from the Internet"; ad-hoc signing does not stop macOS from requiring the person to allow the app. Apple's steps for an app from an unidentified developer: System Settings, Privacy & Security, then under Security **Open Anyway**, offered for about an hour after the attempt to open it, then the login password. | [Tauri macOS signing](https://v2.tauri.app/distribute/sign/macos/), [Apple: open a Mac app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac) |
 | For an unsigned Windows file, Microsoft Defender SmartScreen shows "Windows protected your PC" and the person must choose **Run anyway**, shown after **More info**, before it runs. Enterprise policy can remove that choice, an unsigned file starts with no reputation on every new version, and on Windows 11 Smart App Control blocks unsigned files that have no positive reputation. | [Microsoft: SmartScreen reputation for Windows app developers](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation); [BleachBit's SmartScreen page](https://www.bleachbit.org/microsoft-defender-smartscreen) for the "More info" step |
 | macOS ships `/usr/bin/sandbox-exec`, whose manual page calls it "DEPRECATED" and points developers to App Sandbox. On this machine (macOS 14.5), a Node process run under the profile `(version 1) (allow default) (deny network*)` got `EPERM` for a TCP connection and for a `fetch` to a loopback listener started outside it, and `EPERM` for a Unix-domain socket connection to a live listener, while its stdin pipe kept working; the same calls outside the profile connected, and neither listener saw a connection from the sandboxed process. | `man sandbox-exec`; a local test with Node against loopback and Unix-domain listeners only, no external traffic |
-| Linux `unshare` (util-linux) creates a new network namespace with `--net`, and a user namespace with `--user`, mapping the caller to the same ids with `--map-current-user` or to root with `--map-root-user`; bubblewrap offers `--unshare-net`. Ubuntu 23.10 and later can restrict unprivileged user namespaces through AppArmor (`kernel.apparmor_restrict_unprivileged_userns`), allowing them only to programs whose profile has a `userns` rule or to holders of `CAP_SYS_ADMIN`. | [`unshare(1)`](https://man7.org/linux/man-pages/man1/unshare.1.html), [Ubuntu: restricted unprivileged user namespaces](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces) |
+| Linux `unshare` (util-linux) creates a new network namespace with `--net`, and a user namespace with `--user`, mapping the caller to the same ids with `--map-current-user` or to root with `--map-root-user`; bubblewrap offers `--unshare-net`. Ubuntu 23.10 and later can restrict unprivileged user namespaces through AppArmor (`kernel.apparmor_restrict_unprivileged_userns`), allowing them only to programs whose profile has a `userns` rule or to holders of `CAP_SYS_ADMIN`. A network namespace isolates network devices, protocol stacks, ports and the **abstract** Unix-domain socket namespace; a pathname Unix-domain socket is a filesystem object, reached by path with write permission on it, so a network namespace alone does not stop a connection to one. | [`unshare(1)`](https://man7.org/linux/man-pages/man1/unshare.1.html), [`network_namespaces(7)`](https://man7.org/linux/man-pages/man7/network_namespaces.7.html), [`unix(7)`](https://man7.org/linux/man-pages/man7/unix.7.html), [Ubuntu: restricted unprivileged user namespaces](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces) |
 | On Windows, an AppContainer process without the network capability cannot access the network. Launching one takes `CreateAppContainerProfile` and `CreateProcess` with a `STARTUPINFOEX` attribute list carrying `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`, which Node's `child_process` cannot express. | [Microsoft: AppContainer isolation](https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation), [Microsoft: Launch an AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer) |
 
 ## 3. Decisions
@@ -436,8 +437,12 @@ there is no generic “disclosure-set subset” proof:
 2. removed target — no delivery to that target can cross;
 3. removed output field — that pointer is absent from every newly created payload;
 4. lower rate cap — no new cap charge can exceed the lower rolling-window limit;
-5. shorter retention — every affected record already beyond the new deadline is terminal and purged in the same
-   transaction, and no affected record survives its new deadline;
+5. shorter retention — in the same transaction, every deadline that D8's retention table derives from the shortened
+   value is shortened, never lengthened, to the new bound for every record of that rule: staged content owed to any
+   of its versions, and the projections, holds, deliveries, dead-letter payloads, dry-run rows, SSE entries and
+   decision metadata of every version, superseded ones included. Every record already at or past its new bound is
+   ended with its content-free terminal outcome and purged in that transaction, and no affected record survives its
+   new deadline (D8);
 6. narrowed source options — no later provider request, projection or decision can include a removed label,
    conversation, kind or chat, any label outside a newly installed Gmail selector, or spam/trash after that opt-in
    is removed.
@@ -504,10 +509,10 @@ phase E2 adds with Laya; this specification does not edit `SECURITY.md` itself:
 >   including the complete validated derivation lineage for the exact effective rule, target, subscriber and judge
 >   versions; after that authorisation is revoked; while the judge's kind is not enabled; outside its approved mapping,
 >   retention or delivery rate cap; or without successful taint recording before disclosure.
-> - **Network access by the Laya worker** — on macOS or Linux, any network connection made by the Laya worker
->   process; the Laya runtime or model being loaded before the operating-system network boundary named for that
->   platform has passed its start-up check; or any runtime or model file being loaded that does not match the
->   release's runtime lock and model manifest.
+> - **Network access by the Laya worker** — on macOS, the only platform where this version offers Laya, any network
+>   connection the Laya worker process makes, a Unix-domain socket connection included; the Laya runtime or model
+>   being loaded before the `sandbox-exec` boundary has passed its start-up check; or any runtime or model file being
+>   loaded that does not match the release's runtime lock and model manifest.
 
 and, under "What the safety model does not claim":
 
@@ -517,9 +522,9 @@ and, under "What the safety model does not claim":
 >   Disabling or removing any bound rule, target, subscriber or judge, or disabling a judge kind, revokes it
 >   immediately; content already in a network operation cannot be recalled.
 > - **Laya is kept off the network by the operating system, and only where stated.** On macOS the boundary is a
->   `sandbox-exec` profile that denies all network access, and Apple marks `sandbox-exec` deprecated; on Linux it is a
->   new network namespace, which needs unprivileged user namespaces; Laya is not offered on Windows in this version.
->   Code inside the worker that refuses network calls is defence in depth, not the boundary. The boundary does not
+>   `sandbox-exec` profile that denies all network access, Unix-domain sockets included, and Apple marks
+>   `sandbox-exec` deprecated; if it stops applying, Laya is not offered. Laya is not available on Linux or Windows
+>   in this version. Code inside the worker that refuses network calls is defence in depth, not the boundary. The boundary does not
 >   protect against another process of the same user, and the daemon's one-time downloads of the Laya runtime and
 >   model are ordinary network traffic.
 
@@ -776,8 +781,8 @@ an admission needs exists only in that copy.
 **A staged first representation cannot outlive an approved ingest retention.** When it is staged, it receives an
 absolute `stageExpiresAt`: the staging transaction's time plus the **shortest** ingest retention among the rule
 versions that may be owed it then, read from each version's approved document (for a version under a nonterminal
-activation intent, from its pending document). The owed set can only shrink, so the deadline is never moved later,
-and the one shared copy is never kept for a version with a longer retention beyond another owed version's approved
+activation intent, from its pending document). The owed set can only shrink, so the deadline is never extended;
+only a retention tightening can shorten it (D8). The one shared copy is never kept for a version with a longer retention beyond another owed version's approved
 retention; it is purged at the shortest. At `stageExpiresAt`, if any owed version still lacks a committed projection,
 one transaction purges the staged record and, for each such version, writes the content-free terminal admission
 `expired`: it is inserted where the version has no admission row yet, and it replaces an `admitted` row whose
@@ -1230,7 +1235,8 @@ its retention deadline makes it terminal.
 decision keeps that version's projection, whose life is the ingest retention, so when the hold is created its
 deadline is fixed as `holdExpiresAt = min(hold creation + hold retention, stagedAt + that version's ingest
 retention)`, and the decision records which bound applies in `holdBoundBy` (`hold-window` or `ingest-retention`; a
-tie is `ingest-retention`). Neither value is ever extended. If no person resolves the hold by then, one transaction
+tie is `ingest-retention`). The deadline is never extended; only a retention tightening can shorten it, and it then
+records the bound that applies (D8). If no person resolves the hold by then, one transaction
 records the terminal outcome—`hold-expired` when the hold window bound it, `retention-expired` when the ingest
 retention did—purges that rule version's encrypted projection, creates no delivery, retains nothing on behalf of
 another rule and leaves only the content-free decision row; a resolution arriving after that instant is refused.
@@ -1602,7 +1608,7 @@ occurrence at that moment: every active version under the enabled switch whose a
 it could still match (before Gmail's classification read, both received and sent rules for that mailbox); every
 version whose nonterminal activation intent has staged a point for that scope; and, during a replacement drain, both
 the old version and the pending new one. That set only shrinks as classification and filtering proceed, so the
-deadline is never moved, and one shared staged copy is never kept for a longer-retention version beyond a shorter
+deadline is never extended—only a retention tightening can shorten it (below)—and one shared staged copy is never kept for a longer-retention version beyond a shorter
 one's approved retention. Retention keeps that starting point afterwards: a projection's `decisionDeadline` is
 `stagedAt` plus that version's ingest retention, so time spent in staging counts against it, and content ingested in
 the same transaction that first read it has `stagedAt` equal to that commit.
@@ -1787,7 +1793,7 @@ database time/deadlines, D7's decision-metadata purge transition and terminal pa
 deletion jobs.
 
 **Every content-bearing deadline in one place.** Each record that can hold event content has one end, fixed when the
-record is created and never extended; a D2 tightening can only end it sooner. A record created further along starts
+record is created and never extended; only a tightening can shorten it, as the next paragraph says. A record created further along starts
 a clock of its own only where the person approved a separate retention for it in the rule's activation (D2);
 everything else is capped at the content's `stagedAt` plus the applicable ingest retention.
 
@@ -1810,6 +1816,22 @@ before it ends, the longest any content can exist under one rule is the ingest r
 every hold ends), then the delivery retention, then either the dead-letter retention or, for dry-run and SSE, their
 own retention from append. With the defaults that is at most 21 days for a webhook or SSE payload and 14 days plus 24
 hours for a dry-run row. Every activation preview states these maxima for the rule's own targets and retentions.
+
+**A retention tightening shortens every affected deadline in its own transaction.** D2's no-approval shortening of
+a retention value is one SQLite transaction, so a crash leaves all of the following or none of it. Besides installing
+the derived version, the transaction recomputes every deadline that the table derives from the shortened value, for
+every record of that rule: staged content owed to any version of the rule, and the projections, holds, deliveries,
+dead-letter payloads, dry-run rows, SSE entries and decision metadata of every version, superseded ones included.
+Each new deadline is `min(current deadline, that record's clock start + the new retention)`, so a deadline can be
+shortened and never lengthened; a hold's `holdBoundBy` becomes whichever bound now applies; and a staged record
+shared with other rules takes the new minimum over every version it is still owed to. Every record whose new deadline
+is at or before the transaction's time is ended in that same transaction with its table outcome—`retention-expired`
+(WhatsApp `expired`) for staged content, projections and deliveries, `hold-expired` or `retention-expired` for a hold
+according to its new bound, the payload purge for dead-letter, dry-run and SSE rows, and the metadata purge for
+decision metadata—and its content is purged. Work bound to the displaced version is cancelled and purged by the
+tightening itself (D2), so the recomputation matters for staged content, which is not yet bound to a version, and for
+the retained work of the rule's superseded versions. A loosening never touches an existing record: its new exact
+version's longer retentions apply only to records created under it.
 
 ### D9. Authoritative event state and the config boundary
 
@@ -2059,7 +2081,7 @@ materialisation retry age plus `vanished`/`unresolvable`/`retention-expired` cou
 source, and source lag,
 leases, held decisions, dead letters, retention deadlines and missing secrets. It also reports each judge kind's
 enablement version or `disabled`, the Laya manifest id, runtime-lock digest, runtime and model state and the network
-boundary in use (or why none applies), and, for each WhatsApp account,
+boundary in use or, on Linux and Windows, that Laya is not available yet and why, and, for each WhatsApp account,
 whether D9's live lists are applied and when.
 
 The `agentcomms-events` skill teaches an agent to propose and test a disabled rule, explain both untrusted
@@ -2071,7 +2093,7 @@ person. It never instructs the agent to type or request a secret.
 | Kind | Contract | Disclosure |
 |---|---|---|
 | `typesafe` | Jev through `POST https://api.typesafe.ai/v1/systemone`, using provider-native Noul output. It is **treated as hosted-only under currently published artefacts and terms**; this is not a claim that local Jev is impossible. | Exact approved input fields leave for the approved host. |
-| `laya` | Laya (§2), run on this machine's CPU by a supervised child process of the daemon, from a pinned, checksum-verified ONNX bundle that is downloaded only after the person enables the kind. Its Noul P(true) is interpreted exactly like Jev's (D5). After the download it uses no network, which the operating system enforces on macOS and Linux; it is not offered on Windows in version 1. | Nothing leaves the machine: the exact approved input fields reach only the local worker. |
+| `laya` | Laya (§2), run on this machine's CPU by a supervised child process of the daemon, from a pinned, checksum-verified ONNX bundle that is downloaded only after the person enables the kind. Its Noul P(true) is interpreted exactly like Jev's (D5). After the download it uses no network. Version 1 offers it on macOS only, where the operating system enforces that; Linux and Windows show it as not available yet. | Nothing leaves the machine: the exact approved input fields reach only the local worker. |
 | `local-endpoint` | An approved `http` Ollama/System One endpoint or generic JSON-output model whose URL host is the literal `127.0.0.1` or `::1`; hostnames, HTTPS and non-loopback addresses are refused. Generic numbers are uncalibrated scores. The endpoint gets D7's per-connection resolution, address-set binding and redirect refusal; pending endpoints cannot be reached from MCP tests. | Only the explicitly approved literal loopback address; D7 taint still flushes before every call. |
 
 **Every judge kind is off until the person enables it.** A new database has no enablement pointer for any kind, and
@@ -2109,7 +2131,8 @@ on a literal loopback address is already usable as a `local-endpoint` System One
 `laya` kind below opens no listener at all.
 
 **Laya, in this build, optionally.** The owner asked whether Laya could be packed into this build, optionally (§1,
-§8). It can: the code that runs it is published with this repository's packages, the model is downloaded only when
+§8). It can, and in version 1 it is offered on macOS only and in English only (§8): the code that runs it is
+published with this repository's packages, the model is downloaded only when
 the person enables the `laya` kind, and nothing about it is in any installer.
 
 *The runtime.* The worker runs `@receptron/laya`, pinned exactly, and calls only
@@ -2141,32 +2164,38 @@ daemon stops, and is started again after a crash. One worker answers one request
 refuses a `laya` per-provider concurrency ceiling above 1.
 
 *No network: the operating system's boundary, not the worker's promise.* Once the model is downloaded, Laya uses no
-network, and that is enforced by the operating system around the worker, not by code inside it. What is enforced
-differs by platform, and every Laya preview, the Judges screen, `doctor` and `SECURITY.md` (D2) say exactly this:
+network, and that is enforced by the operating system around the worker, not by code inside it. By the owner's
+decision of 2026-10-06 (§8), version 1 offers Laya **on macOS only**, the one platform where this design has a
+boundary that also stops pathname Unix-domain sockets. Every Laya preview, the Judges screen, `doctor` and
+`SECURITY.md` (D2) say exactly this:
 
-- **macOS:** the worker runs under `/usr/bin/sandbox-exec -p "(version 1) (allow default) (deny network*)"`. That
-  profile denies every network operation, including loopback and Unix-domain sockets, while leaving the stdin and
+- **macOS (offered):** the worker runs under `/usr/bin/sandbox-exec -p "(version 1) (allow default) (deny network*)"`.
+  That profile denies every network operation, including loopback TCP and pathname Unix-domain sockets, while leaving
+  the stdin and
   stdout pipes and file reads working; it was checked on macOS 14.5 (§2). Apple marks `sandbox-exec` deprecated in
   favour of App Sandbox. It is still the boundary in version 1 because it is the one an unsigned build can apply. If
   a macOS release removes it, or the self-test below finds that the profile no longer applies, Laya is not offered
   on that machine; the replacement is a helper executable signed with the App Sandbox entitlement and without the
   network-client entitlement, which belongs with D14's signing work and is D15 until then.
-- **Linux:** the worker runs in a new user and network namespace, through `unshare --user --map-current-user --net`
-  (util-linux; `--map-root-user` where an older `unshare` lacks `--map-current-user`) or, where that fails,
-  `bwrap --unshare-net` (bubblewrap). The namespace has no interface except an unconfigured loopback. Distribution
-  policy can forbid unprivileged user namespaces, as Ubuntu 23.10 and later can through AppArmor (§2), so the daemon
-  tries both at enablement and at every start; where neither works, the `laya` kind is not offered and the reason is
-  shown.
-- **Windows:** Laya is **not offered in version 1**. An AppContainer without the network capability would be a
-  boundary that an unprivileged process can apply (§2), but launching one needs a native Win32 launcher that Node's
-  `child_process` cannot replace and that this design does not include, and Node under an AppContainer is untested.
-  The Judges screen shows Laya as unavailable on Windows with that reason; the launcher is D15.
+- **Linux (not available yet):** a new network namespace (`unshare --net` or bubblewrap's `--unshare-net`, §2)
+  removes every network interface, but it isolates only the abstract Unix-domain socket namespace: a pathname
+  Unix-domain socket is a filesystem object, so a worker in its own network namespace could still connect to a
+  socket file of another service on the machine. A Linux boundary therefore also needs a filesystem view that exposes
+  only the runtime and model, which is D15's future design. The Judges screen and `doctor` show Laya as not available
+  yet on Linux with that reason, and enabling it there is refused before any approval is prepared or anything is
+  downloaded.
+- **Windows (not available yet):** an AppContainer without the network capability would be a boundary that an
+  unprivileged process can apply (§2), but launching one needs a native Win32 launcher that Node's `child_process`
+  cannot replace and that this design does not include, and Node under an AppContainer is untested. The Judges
+  screen and `doctor` show Laya as not available yet on Windows with that reason, enabling it is refused in the same
+  way, and the launcher is D15.
 
-The boundary is proved at every start, not assumed. The daemon opens a one-time loopback listener and starts the
-worker inside the boundary. The worker's first act, before it imports anything but Node built-ins and before any
-runtime or model file is opened, is to try a TCP connection to that listener and report the error it got. The daemon
-accepts the boundary only if that attempt failed, no connection reached its listener within the probe window, and,
-on Linux, the worker reports no network interface except loopback. Otherwise it kills the worker, records a
+The boundary is proved at every start, not assumed. The daemon opens two one-time listeners—a loopback TCP listener
+and a pathname Unix-domain socket in a fresh owner-only directory under the data directory—and starts the worker
+inside the boundary. The worker's first act, before it imports anything but Node built-ins and before any runtime or
+model file is opened, is to try a TCP connection to the first and a connection to the second's path, and to report
+both errors. The daemon accepts the boundary only if both attempts failed and neither listener received a
+connection within the probe window. Otherwise it kills the worker, records a
 content-free `boundary-failed` for `doctor` and the app, and does not send the load request: the worker never loads
 the runtime or the model outside a boundary that has passed. Inside the boundary the worker also replaces
 `globalThis.fetch` with a function that throws and imports no network module, and a test asserts that it opens no
@@ -2239,7 +2268,7 @@ The lock, `laya-runtime.json`, ships inside `@agentcomms/events-daemon`, so it i
 code: npm provenance binds that package to this repository's commit and release run (§2). It lists the runtime's
 complete dependency closure as resolved by this repository's lockfile (19 packages for the candidate set, §2). For
 each package it gives the name, version, `https://registry.npmjs.org/` tarball URL and the registry's `sha512`
-integrity. For each platform that offers Laya (macOS and Linux on x64 and arm64) it lists every file to install: its
+integrity. For each platform that offers Laya (in version 1, macOS on arm64 and x64) it lists every file to install: its
 path under `node_modules/`, size, SHA-256 and whether it is executable. The third-party set is declared in a private,
 unpublished workspace package, `packages/events-laya-runtime`, that holds no code. The release job builds the lock by
 fetching each tarball, checking its integrity and extracting it with the daemon's own extractor, and a repository
@@ -2294,11 +2323,12 @@ published Laya package: the worker entry is part of the daemon, the third-party 
 `packages/events-laya-runtime`, and in this repository pnpm's empty `allowBuilds` already keeps `onnxruntime-node`'s
 install script from running. The Tauri app contains no ONNX Runtime, worker, model or Node code and downloads
 nothing: as a client of the daemon (D12) it shows the enablement preview and approval, installation and download
-progress, the model's state and, on Windows, why Laya is unavailable. Its CSP, capabilities and installers are
+progress, the model's state and, on Linux and Windows, that Laya is not available yet and why. Its CSP,
+capabilities and installers are
 unchanged.
 
-*Stated limits.* Every Laya preview says: English checkpoint; 512-token context; CPU only; macOS and Linux only, with
-the network boundary that applies on this machine named; about 1.69 GB on disk, about 2 GB of memory while the worker
+*Stated limits.* Every Laya preview says: English only in version 1, by the owner's decision (§8); 512-token
+context; CPU only; macOS only in version 1, kept off the network by a `sandbox-exec` profile; about 1.69 GB on disk, about 2 GB of memory while the worker
 runs, one call at a time; weights by Convai Innovations under Apache-2.0,
 converted to ONNX by a third party (receptron, MIT); accuracy in languages other than English is not established by
 this design. GPU execution providers and the multilingual checkpoint are D15.
@@ -2313,8 +2343,8 @@ only if expected calibration error over ten equal-width bins is at most 0.10, Br
 least 0.80, using the bundle's own temperatures. That is how D5's **probability** label is earned on this data rather
 than taken from the model card, which itself says its probabilities need checking on your own data. The gate also
 requires the worker's `p` to be within 0.001 of the Python reference `laya` at the weights' source revision on every
-corpus item, a warm p95 latency of at most 2 seconds and peak worker memory of at most 3 GB inside the network
-boundary on an Apple-silicon Mac and on Linux x64, and a report of inputs refused for length and of results per language. A template that
+corpus item, a warm p95 latency of at most 2 seconds and peak worker memory of at most 3 GB inside the `sandbox-exec`
+boundary on an Apple-silicon Mac, and on an Intel Mac before Intel Macs are offered, and a report of inputs refused for length and of results per language. A template that
 fails is not offered; if neither passes, the `laya` kind is not offered in that release. The gate decides when Laya
 ships, not whether it is designed.
 
@@ -2576,8 +2606,9 @@ no recursive delivery case.
    dry-run rows, degraded reset barriers with `target resume`, and held decisions.
 6. **Judges** — the three judge kinds, each shown off until enabled here: enable opens the D2 approval flow with
    D11's preview, and disable applies immediately. Then exact inputs, the hosted warning, human-only keys, local
-   endpoints and, for Laya, its stated limits, licences, the network boundary that applies on this machine (or, on
-   Windows and wherever no boundary can be applied, why Laya is unavailable), runtime installation and download
+   endpoints and, for Laya, its stated limits, licences, the `sandbox-exec` boundary on a Mac (or, on Linux and
+   Windows, "not available yet" with the reason, and on a Mac where the boundary cannot be applied, why), runtime
+   installation and download
    progress, verified state and remove-files action. Key entry/rotation opens `secrets`.
 7. **Approvals** — complete standing-authorisation preview and typed challenge.
 8. **Settings** — autostart, keep collecting after quit, event secret backend/migration, retention, data location
@@ -2770,7 +2801,11 @@ part: without a signing configuration it publishes only prereleases and refuses 
 - **Other local judge models:** D11 specifies one, Laya's English checkpoint on the CPU. Laya's multilingual
   checkpoint, GPU execution providers, another runtime and any other local model each need their own manifest entry,
   licence check, pinned checksummed source, isolation review and pass of D11's labelled Gmail/Slack gate, and no
-  model is ever put inside an installer. Two network boundaries are also future work: a Windows launcher that starts
+  model is ever put inside an installer. Three network boundaries are also future work. A Linux boundary must combine
+  a new network namespace with a filesystem view that exposes only the runtime and model—for example bubblewrap with
+  `--unshare-net` and binds of just those directories and the Node binary—so that pathname Unix-domain sockets of
+  services on the machine are unreachable as well, and its tests must probe a pathname Unix-domain socket as well as
+  TCP before Linux can offer Laya. The others are a Windows launcher that starts
   the worker in an AppContainer without the network capability, after a spike proves Node runs there, which would let
   Windows offer Laya; and a helper signed with the macOS App Sandbox entitlement and no network-client entitlement,
   which replaces `sandbox-exec` if Apple removes it and belongs with D14's signing work.
@@ -2790,7 +2825,7 @@ Each phase is specified, reviewed, planned and built separately. The order is by
 | C | Desktop app in `apps/desktop` of this repository, joining the pnpm workspace, and tray lifecycle, separate privileged `secrets` window, per-window capabilities, production no-egress CSP/navigation policy, Rust approval/secret surfaces, supervision and protocol compatibility; the unsigned version-1 `desktop-v*` prerelease workflow, its first-launch documentation and the signing gate for any wider release | B3 |
 | D | Slack, Resend and WhatsApp sources, including resumable Slack pagination and aggregate top-level/reply drain barriers, Resend required-detail terminal resolution and Unicode-code-point normalisation, and WhatsApp event-owned raw-key generation diffs using the protocol message key, never `Z_PK` or an index-derived sender, with first representations staged before the checked copy is disposed and D9's recoverable list-change protocol and live-list checks on every WhatsApp dry-run read and SSE frame; each ships with per-source taint and reset/fairness tests | B1 |
 | E | Judge-kind enablement with every kind off until enabled, hosted Jev and `local-endpoint` judges, holds, rolling durable budgets with crash-settled reservations, adversarial corpus; refuses to build or ship unless B3's secret-completion and human-only capability surfaces are present | B3 (C for app hold resolution and the Judges screen) |
-| E2 | The `laya` judge kind on macOS and Linux: the reviewed model manifest, the private `packages/events-laya-runtime` and the release-built runtime lock, the daemon's own verified tarball fetch and strict extraction, the verified, resumable model download, whole-tree verification before every start, the update rule, the operating-system network boundary with its start-up self-test, the isolated worker and its fences; ships in a release only when D11's labelled Gmail/Slack quality gate passes for that manifest entry and template | E (C for the app's enablement and progress screens) |
+| E2 | The `laya` judge kind on macOS only, English only: the reviewed model manifest, the private `packages/events-laya-runtime` and the release-built runtime lock, the daemon's own verified tarball fetch and strict extraction, the verified, resumable model download, whole-tree verification before every start, the update rule, the operating-system network boundary with its start-up self-test, the isolated worker and its fences; ships in a release only when D11's labelled Gmail/Slack quality gate passes for that manifest entry and template | E (C for the app's enablement and progress screens) |
 | F | Reserved for the five separate future designs in D15; this specification supplies no implementation or acceptance contract for them | D, E, E2 |
 
 No phase before B2 can make network disclosures. No new source ships without taint-before-disclosure. No judge of
@@ -2871,11 +2906,13 @@ any kind is callable before E, and none afterwards until the person enables its 
   downgrade behaves the same way. The worker inherits no `AGENT_COMMS_*`, token, proxy, `LAYA_*` or `NODE_OPTIONS`
   variable or extra descriptor; the package's own downloader is never reached. The network boundary is tested on each
   platform: on macOS the worker runs under the `deny network*` profile and a TCP, `fetch`, UDP and Unix-domain
-  attempt each fails while its pipes work; on Linux it runs in a new network namespace through `unshare` and,
-  separately, through `bwrap`, and sees only loopback; with `sandbox-exec` absent, with both Linux tools absent and
-  with user namespaces forbidden, `laya` is not offered and the reason is shown; a stand-in boundary that lets the
-  self-test connect makes the daemon kill the worker, record `boundary-failed` and never send the load request; and on
-  Windows the kind is not offered and the Judges screen gives the reason. The in-worker `fetch` replacement and the
+  attempt each fails while its pipes work; the self-test probes both a loopback TCP listener and a pathname
+  Unix-domain socket listener and passes only when both attempts fail and neither listener saw a connection; with
+  `sandbox-exec` absent or its profile failing to apply, `laya` is not offered and the reason is shown; stand-in
+  boundaries that let only the TCP probe through, and only the Unix-domain probe through, each make the daemon kill
+  the worker, record `boundary-failed` and never send the load request; and on Linux and Windows the kind is offered
+  nowhere, `judge kind enable laya` is refused before any approval or download, and the Judges screen and `doctor`
+  give the reason. The in-worker `fetch` replacement and the
   no-socket assertion still run, as defence in depth. A worker crash and a 30-second hang each yield no-match with the worker killed and later restarted; an
   input the tokenizer would truncate is refused as malformed; wrong-typed, non-finite or out-of-range output is
   malformed; a `laya` concurrency ceiling above 1 is refused; and the worker exits after ten idle minutes. Fast tests
@@ -2946,7 +2983,8 @@ any kind is callable before E, and none afterwards until the person enables its 
   after every affected projection is terminal.
 - **Stage deadlines, every source:** Gmail, Resend and Slack each run this matrix here; WhatsApp's runs under Sources.
   With two owed rule versions whose ingest retentions differ, every staged record's `stagedAt` and `stageExpiresAt`
-  are fixed at first staging, at the shorter retention, and never move as classification narrows the owed set.
+  are fixed at first staging, at the shorter retention, and are never extended as classification narrows the owed
+  set.
   Injected time one tick before, exactly at and after the deadline covers three cases. Expiry before admission: a
   Gmail raw history page and a Gmail occurrence awaiting its metadata read; a Resend received page held across cycles
   before its anchor is found, and a Resend status-change occurrence; a Slack page or occurrence held before ingest.
@@ -3056,10 +3094,21 @@ any kind is callable before E, and none afterwards until the person enables its 
   that end and that no record starts its clock earlier or later than the table says. Holds: one created soon after
   staging ends `hold-expired` at its window; one created late enough that `stagedAt` + ingest retention comes first
   ends `retention-expired` at that instant, purged with no delivery; equal ends give `retention-expired`;
-  `holdExpiresAt` and `holdBoundBy` never change after creation; and a resolution one tick after the end is refused.
+  `holdExpiresAt` is never extended and changes, with `holdBoundBy`, only when a retention tightening shortens it;
+  and a resolution one tick after the end is refused.
   Deliveries, dead letters, dry-run rows and SSE entries each end exactly at their own approved retention from the
   stated start; a delivery created on the last tick of ingest retention still gets its full delivery retention and
   no more; and the activation preview's stated maxima equal the table's sums for that rule's targets and retentions.
+  A retention shortening is tested on every table row it can affect. A rule with an active and a superseded version
+  has staged content (Gmail, Resend, Slack and WhatsApp), projections, held decisions, queued and retryable
+  deliveries, dead letters, dry-run rows, SSE entries and decision metadata, each placed both before and after the
+  new bound relative to the tightening's time; separate cases shorten ingest, hold, delivery, dead-letter, dry-run,
+  SSE and decision-metadata retention. The one transaction sets each deadline to `min(old, start + new retention)`
+  and never later; ends and purges every record already past the new bound with its table outcome, a hold according
+  to its new `holdBoundBy`; leaves records inside the bound with their shortened deadlines; and gives a stage shared
+  with a longer-retention rule the new minimum. Crash injection before the transaction, at points inside it and
+  after its commit proves all of it is committed or none of it is, and restart then repeats nothing. A later
+  loosening extends none of those deadlines, and records created under the looser version get its retention.
 - **Encryption and installation reset:** packed-record round trips for every encrypted column in per-rule ingest
   projections, source staging, decisions, deliveries, dry-run log, reset delivery and stream log;
   record-version/key-id parsing; exact AAD golden vectors for a single-key `decisions` row and a composite-key
@@ -3221,7 +3270,7 @@ any kind is callable before E, and none afterwards until the person enables its 
   revocation, `disable-all` or a visibility purge.
 
   Stage expiry has its own owed tests. With two owed rule versions whose ingest retentions differ, the staged
-  representation's `stageExpiresAt` is the staging time plus the shorter one and never moves. Injected time one tick
+  representation's `stageExpiresAt` is the staging time plus the shorter one and is never extended. Injected time one tick
   before, exactly at and after that deadline covers three cases: expiry before any admission (both versions get
   `expired`, the stage is purged, and nothing is ever projected or delivered); expiry after an `admitted` row but
   before its projection commits (that row becomes `expired` and no projection appears); and expiry after one version
@@ -3330,13 +3379,14 @@ are in scope only through the approved
 8. **A local model is large, young and someone else's.** Laya's runtime is a third party's 0.1.2, its ONNX bundle is
    a third party's export, and its own card says the probabilities need checking on your own data. It costs about
    1.69 GB of disk and 2 GB of memory and covers English only. It is off until the person enables it; every runtime
-   and model file is pinned in a lock or manifest and verified before every start; it runs in an isolated worker whose
-   lack of network is enforced by the operating system on macOS and Linux, through a macOS tool Apple calls
-   deprecated; it is not offered on Windows in version 1; and it ships only when D11's labelled gate passes.
+   and model file is pinned in a lock or manifest and verified before every start; it is offered on macOS only, in
+   an isolated worker whose lack of network, Unix-domain sockets included, is enforced by a macOS tool Apple calls
+   deprecated; it is not available yet on Linux or Windows; and it ships only when D11's labelled gate passes.
 
 ## 8. Owner decisions (2026-10-06)
 
-The owner answered the five open questions on 2026-10-06. Each answer is folded into the design wherever it
+The owner answered the five open questions on 2026-10-06, and after review round 21 made the three further
+decisions listed as 6–8 the same day. Each answer is folded into the design wherever it
 applies; this list says what was decided and where it landed.
 
 1. **"Leia" is Laya**, by Convai Innovations: an open-source, Jev-compatible typed-decision model, to be packable
@@ -3367,8 +3417,20 @@ applies; this list says what was decided and where it landed.
    "Retention" and §7 risk 4. No cap had to change: dry-run is still capped at 24 hours, SSE replay's seven-day
    default now equals its cap, and equal hold and ingest defaults satisfy `hold ≤ ingest`. The one consequence worth
    naming is that content now stays at rest up to seven days by default rather than 24 hours (§7, risk 4).
+6. **Laya is offered on macOS only in version 1**, inside the `sandbox-exec` profile denying all network access,
+   which was tested to block pathname Unix-domain sockets too. Linux and Windows show Laya as "not available yet"
+   with the reason; the Linux network-namespace boundary is removed from version 1 and becomes a D15 future design
+   that must also deny pathname Unix-domain sockets and test them. Landed in D11 (table, boundary, self-test, lock
+   platforms, packaging, stated limits, gate), D2's `SECURITY.md` text, D10 (`doctor`), D13 (Judges screen), D15,
+   §2 (the Linux row), §4 phase E2, §5 and §7 risk 8.
+7. **Retention stays per stage**, as designed: each downstream retention (delivery, dead-letter, dry-run, SSE replay)
+   is separately approved and starts where the stage before it ends, and the default end-to-end maximum—21 days for
+   a webhook or SSE payload, 14 days plus 24 hours for a dry-run row—is shown in every activation preview. Landed in
+   D8 (retention table and maxima), D2 (retention bullet) and §5 "Retention".
+8. **Laya is English-only in version 1**; the multilingual checkpoint stays in D15. Landed in D11 (stated limits),
+   D15 and §4 phase E2.
 
-## 9. Review items closed on 2026-10-06 (rounds 19 and 20)
+## 9. Review items closed on 2026-10-06 (rounds 19 to 21)
 
 Both findings from review round 19 are closed in the design, following the direction recorded when the review was
 paused; round 20 confirmed both closures.
@@ -3406,7 +3468,7 @@ Round 20 found three further items in the 2026-10-06 revision; each is closed:
    boundary—a `sandbox-exec` profile denying all network on macOS, a new network namespace on Linux—that must pass a
    start-up self-test before the runtime or model loads; Laya is not offered on Windows in version 1, and the `fetch`
    replacement remains only as defence in depth. Landed in D11, D2's `SECURITY.md` text, D13, D15, §7 risk 8, §5 and
-   §2.
+   §2. Round 21 then withdrew the Linux boundary from version 1 (item 9).
 
 6. **Closed before round 21: Gmail, Resend and Slack staging could outlive a shorter ingest retention.** The rule
    from item 3 is now general: every source's staged content gets a fixed `stageExpiresAt` at the shortest ingest
@@ -3422,6 +3484,20 @@ Round 20 found three further items in the 2026-10-06 revision; each is closed:
    left. D8's new retention table gives every content-bearing record's start, cap and outcome, marks which ones have
    a separately approved retention, and states the end-to-end maxima the preview shows. Landed in D7, D8 (`decisions`,
    the held-decision sentence, the table), D2 (retention bullet) and §5 "Retention".
+
+Round 21 found two further items; both are closed:
+
+8. **Closed: a no-approval retention shortening left already-staged content on its old deadline.** A retention
+   tightening now recomputes, in its one transaction, every deadline D8's retention table derives from the
+   shortened value for every record of the rule—staged content owed to any version, and every version's
+   projections, holds, deliveries, dead letters, dry-run rows, SSE entries and decision metadata—to
+   `min(current, start + new retention)`, ending and purging anything already past it with content-free outcomes.
+   "Never moves" is now "never extended; only a tightening can shorten it". Landed in D2 (invariant 5), D4, D7, D8
+   (stage rule, table, the new shortening paragraph) and §5 "Retention" and "Stage deadlines".
+9. **Closed: the Linux network namespace did not stop pathname Unix-domain sockets.** By the owner's decision (§8,
+   item 6), version 1 offers Laya on macOS only; Linux and Windows show "not available yet" with the reason, the
+   Linux boundary moves to D15 with a filesystem-view requirement and Unix-domain tests, and the macOS self-test now
+   probes a pathname Unix-domain socket as well as TCP. Landed in D11, D2, D10, D13, D15, §2, §4, §5 and §7.
 
 ## Appendix A. Version-1 event catalogue (normative)
 
