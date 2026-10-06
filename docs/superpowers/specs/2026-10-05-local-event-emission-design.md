@@ -2,7 +2,7 @@
 
 Status: **revised with the owner's answers on 2026-10-06; awaiting review round 20.** The owner's five answers are
 folded into the design and listed, with where each landed, in §8. Rounds 1–18 were resolved; round 19's two findings
-are still open in §9. Specification only, not an implementation.
+are closed in D4, D8, D9 and D12, and §9 records where. Specification only, not an implementation.
 Written from the cited research pass (§2) and a checked read of this repository at `90463e1`, whose code is release
 0.13.0. The 2026-10-06 revision's new repository citations are to `6f6a9de4` (release 0.14.0) and say so; files such as
 `packages/core/src/approvals.ts` have moved since `90463e1` (the unions this design describes are unchanged), so phase
@@ -323,7 +323,8 @@ claimed cross-store transaction:
    makes no provider call: its pointer transaction copies its parent version's complete per-account activation-point
    set into rows for the derived version and records that inheritance beside the derivation edge.
 
-Startup runs recovery before any source or worker. An intent paired with `used` first copies that core record's
+Startup runs recovery before any source or worker, and in the same phase applies every WhatsApp list change that
+D9's visibility journal shows as unapplied. An intent paired with `used` first copies that core record's
 `usedAt` unchanged into SQLite `claimedAt` when the crash happened before the original SQLite claim write, derives
 the completion deadline as exactly `usedAt + 1 hour`, and then either finishes the direct final
 transaction or, when its planned effect needs source positions, resumes D12's staged-position-and-finalise path from
@@ -353,12 +354,16 @@ and every eligible independently paginated reply scan have covered P; a budget- 
 scope open. For WhatsApp, P is D4's `{ T, baselineGeneration, baselineIdentities }` triple rather than an ordered
 cursor position: the
 old-version drain completes only after the checked baseline snapshot's **set** has been diffed and every occurrence
-in that snapshot eligible under the old version's own lower point has its own old-version admission resolved and, if
-admitted, its one old-version projection/delivery path settled. The new version's baseline writes only its own
+the old version is still owed at P—each in that snapshot, and each staged earlier that still lacks an old-version
+admission, that is eligible under the old version's own lower point—has its own old-version admission resolved from
+its durably staged first representation (D4) and, if admitted, its one old-version projection/delivery path settled.
+Sampling P commits that snapshot through D4's pointer/diff transaction before the checked copy is disposed, so every
+owed key's first representation and time are already encrypted in D8 when the drain needs them; an edit, deletion or
+disappearance after P cannot change or lose them. The new version's baseline writes only its own
 `baseline` rows; it cannot mark the occurrence seen, suppress it or otherwise consume the old version's pending
-admission. No high-water value stands in for that proof. After the swap, a later snapshot row absent from the new
-version's baseline with a stored time at or before its `T` is suppressed for that new version; a row after `T` has a
-new-version admission under D4. Thus one raw occurrence may be admitted once for each independently authorised rule
+admission. No high-water value stands in for that proof. After the swap, the new version admits only a key first seen
+in a generation after its `baselineGeneration` whose stored time is after its `T`; every other key is its `baseline`
+or `suppressed` row under D4. Thus one raw occurrence may be admitted once for each independently authorised rule
 version, while an exact replacement drains the old version without backfilling the new one.
 New-only scopes do not backfill earlier occurrences: an absent ordered acquisition cursor is baselined at P, while an
 existing ordered cursor shared by another rule advances to P without projecting those occurrences for either
@@ -699,7 +704,8 @@ recoverable source of a prior raw-key set. The event subsystem owns the durable 
 authority; this design does **not** change the WhatsApp package's index schema.
 
 **Visibility is before collection, not a later filter.** For each checked source copy the adapter reads one live,
-parseable chat-list value and its D8 monotonic list version under the account visibility gate. It applies exactly
+parseable chat-list value and its D8 monotonic list version under the account visibility gate (D9), whose every
+acquisition first applies any list change the daemon has not yet applied. It applies exactly
 `new Visibility(lists).seesMessage(chatJid, chatKind, senderJidRaw, false)` before a row can enter a snapshot-key
 set, occurrence ledger, candidate stage or normalisation. This is the channel's existing `seesChat`/`seesMessage`
 contract: deny wins, a non-empty allow list is allow-only, and a status post additionally needs a visible author; an
@@ -729,7 +735,22 @@ writes its full visible raw-tuple set to `whatsapp_snapshot_keys`. The write lea
 same visibility gate re-reads the current list version. A mismatch discards that candidate and starts another checked
 pass; with the same version, one transaction reads the prior committed generation, computes the raw-tuple set
 difference, writes or reuses the account-global occurrence-ledger row for each newly present key, durably stages its
-first-snapshot representation and list version, then switches the committed-generation pointer to the candidate. No
+first representation and list version when some version may be owed it (below), then switches the
+committed-generation pointer to the candidate.
+
+A key's **first representation** is chosen once, by the pointer/diff transaction that first stages it: that
+generation's first **eligible** row for the key in `readMessages`' `ZWAMESSAGE.Z_PK` order supplies the delivered
+payload and the stored message time; `Z_PK` is not persisted in, or used to derive, the key. It is encrypted in D8's
+source staging and is the only representation that any rule version's admission, projection or replacement drain
+reads for that key, so a later edit, deletion, media change, duplicate or disappearance cannot change or lose it. It
+is staged only for a key some rule version may be **owed**: an active version under the enabled switch whose chat
+scope includes it, a version whose nonterminal activation intent has a staged point for that chat, or the old version
+of a nonterminal replacement drain on that chat. A key no version may be owed, such as one first seen while the
+switch is disabled, gets its ledger row with no staged representation; the admission predicate below can never admit
+it. A staged representation is purged in the transaction that leaves no version owed it—once every owed version has
+its admission row and, if `admitted`, its committed projection—or earlier by a revoking action, `disable-all` or D9's
+visibility purge. All of this commits before `syncAccount` disposes the checked copy in its `finally` (§2), so nothing
+an admission needs exists only in that copy. No
 normalisation happens in that candidate-write transaction. Only after the pointer/diff transaction commits may
 cleanup delete older generations. If the process restarts before that transaction, the pointer still names the prior
 generation and every other generation is an uncommitted candidate that is discarded; if it restarts after the
@@ -753,15 +774,15 @@ An activation point for each chat is `{ T, baselineGeneration, baselineIdentitie
 contains that generation's keys for the chat; the set remains in the encrypted activation position after ordinary
 snapshot cleanup. `T` is this machine's UTC wall-clock time recorded immediately after that activation snapshot is
 checked. The comparison is to the exact normalised stored message time; the source exposes no bounded relation
-between those clocks, so this specification claims no numeric skew limit or tolerance. During a first post-activation
-generation that contains a ledger occurrence not yet admitted for this rule version, the source uses that generation's
-first **eligible** row for the key in `readMessages`' `ZWAMESSAGE.Z_PK` order solely to choose the delivered payload
-and stored message time; `Z_PK` is not persisted in, or used to derive, the key. The occurrence ledger records that
+between those clocks, so this specification claims no numeric skew limit or tolerance. The delivered payload and
+stored message time are always the key's first representation (above). The occurrence ledger records that
 the raw key was observed once; it does **not** decide whether a rule version may project it. Each active rule version
 instead writes its own D8 admission row: an activation writes `baseline` only for that version's
-`baselineIdentities`; for a key without that version's row, a later visible occurrence becomes `admitted` only when it
-is absent from that version's baseline and its stored time is strictly after that version's `T`, otherwise it becomes
-`suppressed`. Thus WhatsApp has no backfill, an out-of-order row whose first-seen stored time is after `T` is admitted once for that version even if
+`baselineIdentities`; for a key without that version's row, a later visible occurrence becomes `admitted` only when
+its ledger `firstSeenGeneration` is later than that version's `baselineGeneration` and its first representation's
+stored time is strictly after that version's `T`; otherwise it becomes `suppressed`. A key first seen at or before
+`baselineGeneration` is either in `baselineIdentities` or disappeared before that generation; in neither case is it
+this version's to deliver, and in an exact replacement it is the old version's to drain (D2, D12). Thus WhatsApp has no backfill, an out-of-order row whose first-seen stored time is after `T` is admitted once for that version even if
 it is older than a diagnostic high-water position, and a later generation cannot create a second admission for the
 same `(rule version, occurrence)`.
 
@@ -906,8 +927,9 @@ An occurrence creates a projection for an active rule version only when it match
 and its Gmail, Slack or Resend adapter position is **strictly after every applicable lower point selected by the
 active pointer's `currentCutoverId`**. WhatsApp instead applies D4's complete
 `{ T, baselineGeneration, baselineIdentities }` predicate through that version's admission row: it is `admitted`
-only when the identity is absent from **that version's** baseline and its stored message time is strictly after that
-version's `T`; otherwise it is that version's `baseline` or `suppressed` row. An occurrence ledger conflict is only
+only when the key was first seen in a generation after **that version's** `baselineGeneration` (so it is absent from
+that version's baseline) and its first representation's stored message time is strictly after that version's `T`;
+otherwise it is that version's `baseline` or `suppressed` row. An occurrence ledger conflict is only
 the same raw occurrence, never an admission result for another rule version. While a
 replacement drains, that same old version also has the staged P as an inclusive upper point; the new version cannot
 project until the atomic swap, after which its lower point is P. A new-only scope is not backfilled: an absent shared
@@ -1377,7 +1399,8 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   Page/final cursor commit requires every staged occurrence before it to be ingested, skipped by classification, or
   for every otherwise eligible projection to be present in the applicable terminal-resolution table;
 - `whatsapp_visibility(accountId PRIMARY KEY, version, listsDigest, changedAt)` is the monotonic fence for the
-  person-controlled allow/deny lists. It contains no list entries; the channel list file remains authoritative.
+  person-controlled allow/deny lists and D9's journal position: the digest and time of the list state the daemon
+  last applied. It contains no list entries; the channel list file remains authoritative.
   `whatsapp_snapshot_heads(accountId PRIMARY KEY, committedGeneration, visibilityVersion)` and
   `whatsapp_snapshot_keys(accountId, generation, visibilityVersion, chat_jid, sender_jid_raw, stanza_id,
   PRIMARY KEY(accountId, generation, chat_jid, sender_jid_raw, stanza_id))` are the event subsystem's durable raw-key
@@ -1405,9 +1428,10 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   `replacement_drains(intentId, source, accountId, positionScope, oldInScope, newInScope, drainedAt?,
   PRIMARY KEY(intentId, source, accountId, positionScope))` installs P as the old version's inclusive upper fence
   only for ordered sources, records when the complete scope barrier reaches P and keeps after-P occurrences staged
-  until the atomic swap. For WhatsApp it instead records completion only after D12 has resolved the checked baseline
-  set through the old version's own admissions; its `{ T, baselineGeneration, baselineIdentities }` triple and no
-  high-water key are the fence. The new version's baseline admissions are not drain completion and cannot conflict
+  until the atomic swap. For WhatsApp it instead records completion only after D12 has resolved, from their staged
+  first representations, every key the old version is owed at P—the checked baseline set and every earlier-staged key
+  still lacking an old-version admission—through the old version's own admissions; its
+  `{ T, baselineGeneration, baselineIdentities }` triple and no high-water key are the fence. The new version's baseline admissions are not drain completion and cannot conflict
   with those old-version rows.
   For Slack, `slack_reply_drains(intentId, accountId, conversationId, threadTs, cursor, coveredThrough,
   drainedAt?, PRIMARY KEY(intentId, accountId, conversationId, threadTs))` durably enumerates every seven-day-eligible
@@ -1415,14 +1439,18 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   such independently paginated reply row have covered P; budget deferral or 429 leaves the relevant child and the
   aggregate parent open;
 - content-free `ingest(eventId UNIQUE, installationId, type, version, accountId, dedupeKey, occurredAt, observedAt)`
-  plus `ingest_rules(eventId, ruleId, ruleVersion, decisionDeadline, whatsappVisibilityVersion?,
+  plus `ingest_rules(eventId, ruleId, ruleVersion, decisionDeadline, whatsappVisibilityVersion?, whatsappMessageId?,
   encryptedProjection, PRIMARY KEY(eventId, ruleId, ruleVersion))`. Each projection contains only the concrete fields
-  referenced by that rule version's deterministic conditions, judge inputs and mapping; the nullable visibility field
-  is mandatory for a WhatsApp projection and absent for every other channel;
+  referenced by that rule version's deterministic conditions, judge inputs and mapping; the two nullable WhatsApp
+  fields are mandatory for a WhatsApp projection and absent for every other channel. `whatsappMessageId` is the
+  occurrence-ledger key whose raw `(chatJid, senderJidRaw)` D9's live-list check evaluates; `decisions`, `deliveries`,
+  `dryrun_log` and `stream_log` carry the same nullable column under the same rule;
 - `whatsapp_occurrences(accountId, messageId, firstSeenGeneration, firstSeenAt, visibilityVersion,
-  stagedPayloadRef, eventId?, PRIMARY KEY(accountId, messageId))` is the account-global **occurrence ledger**.
+  stagedPayloadRef?, eventId?, PRIMARY KEY(accountId, messageId))` is the account-global **occurrence ledger**.
   `messageId` is A.7's canonical raw key; `firstSeenGeneration`, time and staged-payload reference are immutable.
-  The reference names D8 encrypted source staging; no payload is copied into the ledger.
+  The reference names the key's encrypted first representation in D8 source staging, written by the same
+  pointer/diff transaction that inserts the row; it is null when no version could be owed the key then (D4), and the
+  staged record it names is deleted when no version is owed it any longer. No payload is copied into the ledger.
   It says only that this visible raw occurrence has been observed and supplies source-diff idempotency; it makes no
   baseline, suppression or projection decision. A candidate diff inserts this row once before normalisation; a
   duplicate, mutation or reappearance reuses it and cannot create a second source occurrence. It is deliberately
@@ -1436,10 +1464,10 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   `suppressed` only for the version whose D4 point it evaluates. A row belonging to one rule version can neither
   satisfy nor conflict with one for another version. Projection, decision and delivery idempotency is therefore per
   `(rule version, occurrence)`, even though the content-free ingest identity for the raw occurrence is shared;
-- `decisions(id PRIMARY KEY, eventId, accountId, ruleId, ruleVersion, outcome, holdExpiresAt?, metadataExpiresAt, metadataState,
+- `decisions(id PRIMARY KEY, eventId, accountId, ruleId, ruleVersion, whatsappMessageId?, outcome, holdExpiresAt?, metadataExpiresAt, metadataState,
   purgedAt?, encryptedRecord?, UNIQUE(eventId, ruleId, ruleVersion))`, where the optional record holds the expiring
   judge result and reason rather than placing them in plaintext columns;
-- `deliveries(id PRIMARY KEY, decisionId, accountId, ruleId, ruleVersion, whatsappVisibilityVersion?, targetKey NOT NULL,
+- `deliveries(id PRIMARY KEY, decisionId, accountId, ruleId, ruleVersion, whatsappVisibilityVersion?, whatsappMessageId?, targetKey NOT NULL,
   targetId, targetVersion, subscriberId?, subscriberVersion?, judgeId?, judgeVersion?, encryptedRecord, attempts,
   capChargedAt?, nextAt, expiresAt, state, switchGeneration, leaseUntil, lastErrorCode?, lastStatus?,
   UNIQUE(decisionId, targetKey))`, where `whatsappVisibilityVersion` is mandatory for WhatsApp and absent for every
@@ -1450,10 +1478,10 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   in-flight-at-disable | in-flight-at-account-removal`; waiting behind a cap or reset barrier remains `queued` with
   its original deadline;
 - `dryrun_log(deliveryId PRIMARY KEY, ruleId, ruleVersion, targetId, targetVersion, judgeId?, judgeVersion?, eventId, accountId,
-  encryptedRecord, deliveredAt, expiresAt)` uses the same packed encrypted-record format and has a hard validated
+  whatsappMessageId?, encryptedRecord, deliveredAt, expiresAt)` uses the same packed encrypted-record format and has a hard validated
   maximum lifetime of 24 hours;
 - `stream_log(id PRIMARY KEY, ruleId, ruleVersion, targetId, targetVersion, subscriberId, subscriberVersion, judgeId?,
-  judgeVersion?, eventId, accountId, encryptedRecord, deliveredAt, expiresAt)`;
+  judgeVersion?, eventId, accountId, whatsappMessageId?, encryptedRecord, deliveredAt, expiresAt)`;
 - `judge_budget_reservations` with D5's closed `reserved | in-flight | settled | released` state, stable rule-id,
   provider/global ledger keys, exact rule/budget versions, estimated/actual input tokens and concurrency ownership;
   durable rolling `judge_test_charges(judgeId, judgeVersion, chargedAt)`, `delivery_cap_charges`, worker leases and
@@ -1634,9 +1662,11 @@ for already-bound work. A closed reset
 barrier leaves non-expired ordinary work waiting without crossing the boundary.
 
 A dry-run or SSE append is the delivery boundary: one transaction repeats the
-switch-generation/bound-version/object-revocation/live-account/barrier checks, charges the cap if not already
-charged, appends the encrypted row and marks the delivery delivered. Reading a dry-run row or replaying an SSE row
-checks those same fences and retention but creates no delivery and consumes no cap. Each row stores all rule,
+switch-generation/bound-version/object-revocation/judge-kind/live-account/barrier checks and, for WhatsApp, D9's
+live-list check under the visibility gate, charges the cap if not already charged, appends the encrypted row and
+marks the delivery delivered. Reading a dry-run row or sending an SSE row, live or replayed, checks those same fences,
+including D9's live-list check for every WhatsApp row and frame, and retention, but creates no delivery and consumes
+no cap. Each row stores all rule,
 target/subscriber and optional judge versions under which it was made; supersession retains matching rows, while
 revoking any one bound version purges matching rows in the same transaction.
 Subscriber-token rotation changes only the secret generation, invalidates the old token, closes every live stream
@@ -1669,26 +1699,66 @@ registry by repeatedly calling the core `ConfigStore.load()`; its existing cache
 size, reparses after an atomic replacement and returns a fresh clone (`packages/core/src/config.ts:845-870`). The
 daemon must use that store directly rather than introduce an account identity cache of its own.
 
-**WhatsApp lists are a live disclosure fence.** The account's `whatsapp-chats.json` remains the authoritative
-human-only allow/deny file; D8's `whatsapp_visibility` stores only a monotonic version and digest so work can be
-fenced, not a second copy of the lists. The person-only `allow`, `deny` and `clear` operations, source candidate
-commit and delivery dispatcher share a per-account visibility gate. A list mutation holds that gate across its file
-commit, the D8 version advance and the transaction that re-evaluates every nonterminal WhatsApp occurrence with the
-same `Visibility.seesMessage` semantics. A parse/read error is treated as hide-all and permits no collection or
-dispatch. On a deny or allowlist narrowing, the transaction cancels and purges every newly hidden staged occurrence,
-  occurrence-ledger staged payload, projection, undecided ingest work, queued/retryable delivery, and any
-  `disclosing` delivery that has not crossed its external boundary, plus retained dry-run/SSE payload; it removes
-  hidden tuples from the next authoritative snapshot generation. It removes their
-per-rule admission rows only where doing so is necessary to purge the hidden work; it never changes an unrelated
-rule version's admission. A prior external delivery, dry-run append or SSE frame that has already crossed its
-delivery boundary cannot be recalled.
+**WhatsApp lists are a live disclosure fence.** The account's lists in `whatsapp-chats.json` remain the
+authoritative, human-only allow/deny file. Only the WhatsApp package writes it: `allow`, `deny` and `clear` through
+`ChatListStore.update`, which loads, changes and atomically rewrites the file while holding `.whatsapp-chats.lock`,
+and `forget` when an account is removed (§2). Those commands run in their own process and never open the events
+database (D12), so a list change cannot carry the daemon's purge inside its own commit; round 19 found that an earlier
+form of this fence assumed it could, so a crash between the file commit and the purge left a newly hidden item
+replayable. The fence is instead a recoverable protocol between the file and the daemon:
 
-Every WhatsApp delivery re-reads the live lists and evaluates its raw chat/sender tuple immediately before it crosses
-to `disclosing`, rather than trusting the stored list version. The visibility gate serialises this check with list
-updates: once a denial commits, no later target request, dry-run append or SSE frame may begin for its hidden tuple;
-an attempt that began before that commit is the non-recallable prior delivery just described. A stale-version,
-newly-hidden or unreadable-list result instead atomically cancels the delivery and purges its encrypted record. This
-is a safety fence, not a promise to retract content already sent to a target.
+1. **The gate.** `.whatsapp-chats.lock` is the per-account visibility gate across processes. The list commands already
+   hold it across their file commit. The daemon takes it for every visibility-dependent step below; in the daemon's
+   lock order it comes after the activation lock and any source lock, including the WhatsApp sync lock, and before
+   the SQLite write transaction. A list command takes no other lock, so there is no cycle.
+2. **The journal.** The daemon keeps a durable record of the list state it has applied: D8's
+   `whatsapp_visibility(accountId, version, listsDigest, changedAt)`, where `listsDigest` is the lowercase SHA-256 of
+   core canonical JSON of the account's `{ allow, deny }` exactly as the file holds them (no entry is
+   `{ allow: [], deny: [] }`). The live file is the journal's head and that row is its applied position; there is no
+   second copy of the entries. Any difference between the live digest and the stored one is a list change the daemon
+   has not applied, whoever made it. The round-19 direction named a journal the daemon applies on start. Taking the
+   live file as that journal's head, rather than adding a second file that only the list commands would write, keeps
+   that durability and start-up application; it also catches a hand-edited or restored file, which `lists.ts`
+   explicitly anticipates and a command-written journal would miss, and it needs no change to the WhatsApp package
+   and no dependency of it on the daemon.
+3. **Applying a change.** Holding the gate, the daemon reads and parses the file and, when its digest differs from
+   the stored one, in one SQLite transaction increments `version`, stores the digest and `changedAt`, and
+   re-evaluates every retained WhatsApp item of that account with `Visibility.seesMessage` over its raw
+   `(chatJid, senderJidRaw)`: staged occurrences and staged first representations, projections, undecided ingest
+   work, held decisions, queued, retryable and not-yet-crossed `disclosing` deliveries, dead-letter payloads,
+   dry-run rows and stream rows. Every newly hidden one is cancelled and purged in that transaction. Hidden tuples
+   are removed from the next authoritative snapshot generation, and per-rule admission rows are removed only where
+   purging the hidden work needs it, never an unrelated rule version's. A widening purges and backfills nothing:
+   what the lists hid was never collected (D4).
+4. **When.** At start-up, before any source, worker, control request, dry-run read or SSE stream, in the same
+   recovery phase as D2's activation-intent recovery; at the start of every daemon acquisition of the gate; and
+   whenever the daemon's watcher finds the file's digest changed, which it checks each time it re-loads the account
+   registry and at least every five seconds. Because every gated step first applies any unapplied change, the list
+   version a fence compares is never older than the file.
+5. **Failure.** A file that cannot be read or parsed is hide-all for that account: no candidate commit, dispatch,
+   append, dry-run read or frame proceeds. Nothing is purged on that ground alone, because a transient read error
+   must not destroy retained work; `doctor` and the app show the account's lists as unreadable, and the daemon
+   applies them at the first successful read. A delivery whose boundary meets an unreadable list is still cancelled
+   and purged, as below.
+6. **Crash points.** A crash before the file commit changes nothing. After it and before the daemon's transaction,
+   the stored digest differs from the file, so start-up or the next gate acquisition applies the change before
+   anything is decided, appended, read or replayed. A crash inside the transaction rolls it back and the change is
+   applied again. After its commit, the new version and every purge are durable together.
+
+A list command returns as it does today and neither waits for nor depends on the daemon. `doctor` and the app show,
+for each WhatsApp account, whether its live lists are applied and when.
+
+**Every WhatsApp disclosure and read checks the live lists.** Under the gate, and so after any unapplied change has
+been applied, the daemon evaluates the item's raw tuple against the lists it has just read, immediately before: a
+WhatsApp delivery's transition to `disclosing`; a dry-run append and an SSE append; **every `dryrun show` of a
+WhatsApp row and every SSE frame for one, live or replayed through `Last-Event-ID`** (frames for one account may
+share one acquisition); each source candidate pointer/diff commit; and activation baseline sampling and
+finalisation (D12). Every D8 row that can hold or lead to WhatsApp content carries the `whatsappMessageId` this
+check evaluates. A hidden tuple is cancelled and purged in that transaction. An unreadable list refuses a read,
+append or frame without purging, and cancels and purges a delivery at its boundary. Once a change is applied, no
+later target request, append, dry-run read or SSE frame may begin for its hidden tuple; an external request that
+crossed its boundary before the gate saw the change cannot be recalled and is recorded as such. This is a safety
+fence, not a promise to retract content already sent to a target.
 
 **An independent event secret store.** The events daemon owns one backend selection in SQLite `meta`, independent of
 `config.secrets.store`. The default is `keychain`; its namespace is
@@ -2095,8 +2165,10 @@ Scheduled source polling never runs while disabled. The only disabled-state prov
 exact rule activation and approved `enable-all`, each after its disclosure claim and only for D4's staged-position
 work. While enabled, a claimed exact rule activation has that same narrow exception. Each source adapter exposes a
 separate baseline-only path limited to its cursor/profile/list-head or checked-snapshot-baseline endpoint, with no
-body/file fetch, normalisation, projection or ingest. No judge, target or ordinary poll call is allowed through that
-path. A provider, judge or webhook result that returns after `disable-all`, and a
+body/file fetch, normalisation, projection or ingest. WhatsApp's checked-snapshot path commits its generation through
+D4's pointer/diff transaction, which stages first representations only for keys an active or draining version may be
+owed; while the switch is disabled no version is, so it stages none. No judge, target or ordinary poll call is
+allowed through that path. A provider, judge or webhook result that returns after `disable-all`, and a
 dry-run/SSE append that began before it, is fenced by D8's generation check: older-generation work becomes terminal
 `cancelled`, or remains `in-flight-at-disable` if it had crossed `disclosing`; reservations are released, payloads are
 purged and nothing is re-queued. The external operation may already have happened and is audited as such, but it can
@@ -2135,9 +2207,18 @@ replacement constraint in D8 is checked at prepare, claim and finalisation.
    normalisation, projection, ingest, decision or delivery in the baseline call. For a replacement, the same
    transaction creates its `replacement_drains` row. For Gmail, Slack and Resend, P is the old version's inclusive
    upper projection fence before releasing the scope lock. For WhatsApp, P is the D4
-   `{ T, baselineGeneration, baselineIdentities }` triple, sampled under D4's live visibility gate. A list-read error
+   `{ T, baselineGeneration, baselineIdentities }` triple, sampled under D9's visibility gate, and the
+   baseline-only path is one complete checked pass under the account's sync lock: copy and check the store, apply
+   visibility, write the candidate generation and run D4's ordinary pointer/diff transaction—which writes or reuses
+   each newly present key's ledger row and, for every key some version may be owed, including the old version of
+   this replacement, stages its encrypted first representation—and only then record P with `baselineGeneration`
+   equal to the generation that transaction committed. Both commits precede the disposal of the checked copy. Staging
+   those first representations is the encrypted source staging ordinary collection writes anyway; it is not
+   normalisation, projection or ingest, so the baseline call's restriction above still holds. A crash before
+   the pointer/diff commit leaves no P and no new stage; a crash after it and before the P row keeps the committed
+   generation and its staged representations, and the retry takes a fresh pass for P. A list-read error
    leaves that source scope unstaged and retries it; finalisation writes `baseline` admissions with the sampled list
-   version for the new version only, while the old version's drain resolves the baseline snapshot set under its own
+   version for the new version only, while the old version's drain resolves every key it is owed at P under its own
    lower point and its own admissions; no
    high-water position is an upper fence or a substitute for that resolution. For an ordered new-only scope, an absent
    acquisition cursor is initialised at P and marked drained; an existing shared cursor behind P remains in place for
@@ -2154,14 +2235,16 @@ replacement constraint in D8 is checked at prepare, claim and finalisation.
    continues with the old version, still the active pointer. On each Gmail, Slack or Resend shared or old-only scope,
    occurrence and cursor commits may process that version only through inclusive P; occurrences after P remain
    encrypted in source staging and cannot create a projection until the swap. The commit that reaches P records
-   `drainedAt` in the same transaction. For WhatsApp, the daemon instead diffs the checked baseline snapshot and
-   resolves every baseline occurrence eligible under the old version's lower point through an old-version admission;
-   if its ordinary candidate diff has not yet staged it, this drain first materialises or reuses its occurrence-ledger
-   stage without changing the new version's baseline. An `admitted` occurrence receives exactly that old version's
+   `drainedAt` in the same transaction. For WhatsApp, the daemon instead resolves, through an old-version admission,
+   every key the old version is owed at P: each key of the baseline set and each key staged by an earlier generation
+   that still lacks an old-version admission, wherever eligible under the old version's lower point. Step 2's pass
+   committed the baseline generation through D4's pointer/diff transaction, so every such key already has its ledger
+   row and encrypted first representation; the drain reads that staged representation alone and never a later
+   snapshot or the live store, so an edit, deletion, media change, duplicate or disappearance after P neither changes
+   nor loses what the old version delivers. Nothing here changes the new version's baseline. An `admitted` occurrence receives exactly that old version's
    projection/delivery path even if the new version has already received its own `baseline` row. Completing that
-   old-version set records `drainedAt`. A later snapshot row
-   absent from that baseline and dated at or before `T` is not a substitute for an undrained row and is never
-   projected after the swap. An ordered new-only scope either started at P or advances its
+   old-version set records `drainedAt`. A key first seen at or before `baselineGeneration` that is absent from the
+   baseline is not a substitute for an undrained row and is never projected for the new version after the swap. An ordered new-only scope either started at P or advances its
    shared cursor to P without a replacement-version projection; a WhatsApp new-only scope follows D4. For a Slack
    conversation, reaching P in
    `conversations.history` marks only its top-level component:
@@ -2174,7 +2257,8 @@ replacement constraint in D8 is checked at prepare, claim and finalisation.
 4. **Finalise atomically.** Under the activation lock and required source locks in sorted order, one final SQLite
    transaction rechecks the switch generation, exact expected pointer set, complete authorisation lineages, fixed
    point/call sets, completion deadline, one staged P for every acquisition call and, for a replacement, every
-   `drainedAt`. It also rechecks the live WhatsApp list version for every WhatsApp scope; a changed or unreadable list
+   `drainedAt`. It also takes D9's visibility gate for every WhatsApp scope, which applies any unapplied list change,
+   and rechecks the list version; a changed or unreadable list
    leaves the intent pending-completion for a fresh checked baseline rather than finalising stale visible work. A first activation installs the rule pointer with `currentCutoverId = intentId`, marks that rule
    version `active` and permanently fixes its `approval_id`/`authorization_activation_id = intentId`/`activated_at`, materialises its planned
    `rule_activation_points` and creates an absent acquisition cursor
@@ -2495,7 +2579,7 @@ Each phase is specified, reviewed, planned and built separately. The order is by
 | B2 | Network hardening, plain/secret webhook URLs with URL changes creating new target versions, pinned resolution, HTTPS webhooks with only the literal-loopback HTTP exception, HTTP-only literal-loopback local judges, Standard Webhooks per-attempt signing/rotation, webhook delivery/manual-retry state fences, durable reset barriers/degraded resume, authenticated generation-bound SSE with rotation close, exact-origin CORS, replay retention and version-bound purge | B1 |
 | B3 | The full D10 CLI/MCP surface on B1's service/parity scaffolding and all exception rows, the complete named human-only secret-operation set and migration, dry-run reads and target resume, lineage/pending-completion `doctor`, event skill | B2 |
 | C | Desktop app in `apps/desktop` of this repository, joining the pnpm workspace, and tray lifecycle, separate privileged `secrets` window, per-window capabilities, production no-egress CSP/navigation policy, Rust approval/secret surfaces, supervision and protocol compatibility; the unsigned version-1 `desktop-v*` prerelease workflow, its first-launch documentation and the signing gate for any wider release | B3 |
-| D | Slack, Resend and WhatsApp sources, including resumable Slack pagination and aggregate top-level/reply drain barriers, Resend required-detail terminal resolution and Unicode-code-point normalisation, and WhatsApp event-owned raw-key generation diffs using the protocol message key, never `Z_PK` or an index-derived sender; each ships with per-source taint and reset/fairness tests | B1 |
+| D | Slack, Resend and WhatsApp sources, including resumable Slack pagination and aggregate top-level/reply drain barriers, Resend required-detail terminal resolution and Unicode-code-point normalisation, and WhatsApp event-owned raw-key generation diffs using the protocol message key, never `Z_PK` or an index-derived sender, with first representations staged before the checked copy is disposed and D9's recoverable list-change protocol and live-list checks on every WhatsApp dry-run read and SSE frame; each ships with per-source taint and reset/fairness tests | B1 |
 | E | Judge-kind enablement with every kind off until enabled, hosted Jev and `local-endpoint` judges, holds, rolling durable budgets with crash-settled reservations, adversarial corpus; refuses to build or ship unless B3's secret-completion and human-only capability surfaces are present | B3 (C for app hold resolution and the Judges screen) |
 | E2 | The `laya` judge kind: the reviewed manifest, `@agentcomms/events-laya` with its pinned shrinkwrapped runtime, managed installation with scripts ignored, the verified, resumable model download, the isolated worker and its fences; ships in a release only when D11's labelled Gmail/Slack quality gate passes for that manifest entry and template | E (C for the app's enablement and progress screens) |
 | F | Reserved for the five separate future designs in D15; this specification supplies no implementation or acceptance contract for them | D, E, E2 |
@@ -2868,6 +2952,37 @@ any kind is callable before E, and none afterwards until the person enables its 
   not-yet-delivered staged, projected and delivery work—including a `disclosing` row that has not crossed that
   boundary—is cancelled and purged. A fixture separately establishes the stated limit: a request that crossed its
   external boundary before the denial is already sent and cannot be recalled.
+
+  The replacement first-representation matrix closes round 19's first item. R1's old version is active for chat C,
+  and a message M strictly after R1's cut-over first appears in the checked copy that an exact replacement samples
+  for P, so P's pointer/diff transaction is the first to stage M. Between P and the old version's drain, M is in
+  turn deleted, turned into a placeholder, edited, given each media-metadata change (MIME type, size, title or
+  caption, local-path-derived filename), duplicated, and dropped from later snapshots; each case also runs with a
+  restart after the pointer/diff commit, after the `activation_baselines` row, during the drain and immediately
+  before the swap. Every case yields exactly one old-version admission, projection and delivery whose payload, `at`
+  and `occurredAt` are M's first representation, only a `baseline` row for the new version, and no read of a later
+  snapshot or the live store for M. A key staged by an earlier generation that still lacks an old-version admission
+  and has left the snapshot before P is drained by the old version and `suppressed` for the new one, and a key first
+  seen at or before `baselineGeneration` is never admitted by the new version whatever its stored time. A failure
+  injected before the pointer/diff commit leaves no P and no stage, and an ordering assertion proves the checked copy
+  is disposed only after both commits. A baseline pass while the switch is disabled stages no representation. A
+  staged representation is purged exactly when its last owed version has admitted and projected it, or earlier by a
+  revocation, `disable-all` or a visibility purge.
+
+  The list-change crash matrix closes round 19's second item. WhatsApp items for one tuple are staged, projected,
+  held, queued, retryable, `disclosing` but not yet across the boundary, dead-lettered, in `dryrun_log` and in
+  `stream_log`; then a `deny` and, separately, an allowlist narrowing hide that tuple through the real
+  `ChatListStore.update`, and the daemon is killed before the file commit, after the file commit and before any
+  daemon step, inside the apply transaction, and after it. In every case, before and after restart, `dryrun show` of a
+  hidden row, a `Last-Event-ID` replay and a live stream disclose nothing for the hidden tuple and no target request
+  or append begins for it; start-up applies the change before any source, worker, control request, dry-run read or
+  stream, purges every newly hidden item exactly once and advances `version` once; and a second restart changes
+  nothing. A hand-edited and a restored list file, changed by no list command, are detected by digest and applied the
+  same way. A deny that commits while the daemon waits for the gate is applied before its next gated step; a request
+  that crossed its boundary first is recorded as non-recallable. An unreadable file refuses reads, frames, appends and
+  candidate commits without purging, cancels and purges a delivery at its boundary, and is applied at the first
+  successful read. A widening purges and backfills nothing. Lock-order tests run a list command, an interactive
+  `sync`, a candidate commit, a finalisation and the dispatcher together and never deadlock.
 - **Network:** DNS rebinding on every attempt; all-answer set membership; approved and unapproved globally routable
   and non-globally-routable answers; every non-globally-routable entry in the current IANA IPv4/IPv6 registries;
   IPv4 mapped/compatible, active NAT64, 6to4 and
@@ -2989,26 +3104,27 @@ applies; this list says what was decided and where it landed.
    default now equals its cap, and equal hold and ingest defaults satisfy `hold ≤ ingest`. The one consequence worth
    naming is that content now stays at rest up to seven days by default rather than 24 hours (§7, risk 4).
 
-## 9. Open review items (round 19)
+## 9. Round-19 review items (closed 2026-10-06)
 
-The design review was stopped after round 19 so that the owner's answers to §8 can shape what is designed next; both
-items below are real, and phase planning must close them before D4's WhatsApp source and D9's list fence are built.
+Both findings from review round 19 are closed in the design, following the direction recorded when the review was
+paused; round 20 reviews the closures.
 
-1. **An unstaged WhatsApp key in a replacement baseline has no durable payload for the old version's drain.** A
-   replacement point records only `{T, baselineGeneration, baselineIdentities}` and snapshot rows hold only raw key
-   tuples, so a post-cut-over message that first appears in the new version's checked baseline, and is then edited,
-   deleted or gone before the old version drains it, cannot be formed from its first representation. Intended
-   direction: acquiring the replacement point durably preserves the first representation and time (encrypted, D8) of
-   every key the old version is still owed, before the checked copy is disposed. Owed tests: that case with a deletion
-   and with each payload mutation between the point and the drain, and across a restart.
-2. **The WhatsApp allow/deny fence is not crash-safe, and SSE replay does not check it.** The lists are a separate file
-   that `allow`, `deny` and `clear` write under their own lock (`packages/whatsapp/src/operations/chat-lists.ts:90`),
-   while only the daemon opens the events database (D12), and the replay and dry-run fences (D7, D8) do not consult
-   visibility. A crash after the list file commits and before the purge leaves a newly hidden item replayable.
-   Intended direction: a recoverable list-change protocol between the file and the daemon (a journal the daemon
-   applies on start), and a live-list check under the visibility gate for `dryrun show` and every replayed SSE frame.
-   Owed tests: a crash after each file, journal and database step, then `dryrun show` and a `Last-Event-ID` replay
-   disclose nothing and recovery purges the stale rows.
+1. **Closed: an unstaged WhatsApp key in a replacement baseline had no durable payload for the old version's drain.**
+   Sampling a replacement's WhatsApp point is now one complete checked pass that commits its generation through D4's
+   pointer/diff transaction, which stages every owed key's first representation and time encrypted in D8, before the
+   checked copy is disposed; the old version drains every key it is owed at P from that staged representation alone,
+   and the new version admits only keys first seen after its `baselineGeneration`. Landed in D4 (first
+   representation, owed staging, admission predicate), D2 (replacement drain), D8 (`whatsapp_occurrences`,
+   `replacement_drains`), D12 (steps 2 and 3, baseline-only path), Appendix A.7 and A.8, §4 phase D, and §5's
+   replacement first-representation matrix.
+2. **Closed: the WhatsApp allow/deny fence was not crash-safe, and SSE replay did not check it.** The lock file
+   `.whatsapp-chats.lock` that the list commands already hold (`packages/whatsapp/src/lists.ts:102-118` at
+   `6f6a9de4`) is the cross-process visibility gate; the daemon's applied-digest row is the journal it applies at
+   start-up and at every gate acquisition; and every WhatsApp dry-run read, SSE frame (live or replayed), append and
+   delivery boundary checks the live lists under the gate. Landed in D9 (protocol and live-list checks), D8
+   (`whatsapp_visibility`, `whatsappMessageId`, append/read fences), D2 (start-up recovery, boundary fence), D4, D7
+   (dry-run and SSE rows), D10 and D13 (applied state), D12 (finalisation), §4 phase D, and §5's list-change crash
+   matrix.
 
 ## Appendix A. Version-1 event catalogue (normative)
 
@@ -3498,8 +3614,9 @@ In particular,
 `Presenter.message`'s wrapped content cannot affect the key (`packages/whatsapp/src/index-db.ts:107-112,172-236`;
 `packages/whatsapp/src/present.ts:126-159`).
 
-All eligible rows with one raw key are one message and one set member. Its first post-activation snapshot
-representation supplies `text`, media, other payload fields and the stored timestamp used for `at` and `occurredAt`;
+All eligible rows with one raw key are one message and one set member. Its first representation—chosen when D4's
+pointer/diff transaction first stages the key, which for any admitted key is after the admitting version's
+activation—supplies `text`, media, other payload fields and the stored timestamp used for `at` and `occurredAt`;
 later edits, delete/placeholder states, media downloads and duplicate rows cannot change the emitted event or create
 another one. Version 1 defines no edit or delete event. Its stated collision limitation is that genuinely different
 messages sharing a raw protocol key are treated as one: the design relies on the protocol key, not on a proven
@@ -3565,8 +3682,9 @@ deliberate differences from the cited result types:
 
    The raw protocol key, not text, title, MIME type, size, local path/name, delete/placeholder state, display name or
    another derived/rendered value, supplies `messageId`, `subject`, `dedupeKey` and snapshot membership. All eligible
-   rows with that key collapse to one set member. The payload comes from the key's first post-activation snapshot
-   representation and is then immutable for Version 1 emission: a change is not a second received event. Raw
+   rows with that key collapse to one set member. The payload comes from the key's first representation, staged
+   encrypted by D4's pointer/diff transaction before the checked copy is disposed, and is then immutable for Version 1
+   emission: a change is not a second received event. Raw
    `ZFROMJID` becomes required `sender.id`, while `sender.name` may be derived only for presentation; a differing
    index display sender cannot alter event identity. Each `UntrustedField` becomes its safe inner text, and absent
    `groupEvent` normalises to `null`. `chat` is joined from `ChatView`; read-only rendering diagnostics and analysed
