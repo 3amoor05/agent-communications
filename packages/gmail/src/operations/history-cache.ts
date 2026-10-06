@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { withFileLock, writeFileAtomic } from '@agentcomms/core';
+import { type LockOptions, withFileLock, writeFileAtomic } from '@agentcomms/core';
 
 /**
  * The shared history caches (design 2026-10-05 §D4): what a recipient analysis learned from this mailbox's Sent, kept
@@ -25,6 +25,13 @@ export const HISTORY_CACHE_MS: number = 10 * 60 * 1000;
 
 /** The most entries each cache keeps per state directory. */
 export const HISTORY_CACHE_CAP: number = 5_000;
+
+/**
+ * How long a change may wait for a cache's lock in all, however often it changes hands meanwhile. The lock is a queue —
+ * separate processes each holding it for one short change — so a waiter's timeout counts from the last hand-over, and
+ * gives up early only on a holder that keeps it the whole timeout; this bounds the rest.
+ */
+export const HISTORY_LOCK_MAX_WAIT_MS: number = 30_000;
 
 /** What a prior-send check of one address found, as the cache keeps it. */
 export type HistoryResult = 'written' | 'not-written' | 'budget-exhausted' | 'provider-error';
@@ -52,6 +59,10 @@ export interface HistoryCacheOptions {
   readonly cap?: number | undefined;
   /** The atomic write. A test replaces it with one that fails, before the rename or after it. */
   readonly write?: ((path: string, data: string) => Promise<void>) | undefined;
+  /** How long one holder may keep the lock before a waiter gives up: the lock's own default unless a test shortens it. */
+  readonly lockTimeoutMs?: number | undefined;
+  /** How long a change may wait for the lock in all: {@link HISTORY_LOCK_MAX_WAIT_MS} unless a test shortens it. */
+  readonly lockMaxWaitMs?: number | undefined;
 }
 
 interface Timed {
@@ -98,12 +109,20 @@ export class HistoryCache {
   readonly #now: () => Date;
   readonly #cap: number;
   readonly #write: (path: string, data: string) => Promise<void>;
+  readonly #lock: LockOptions;
 
   constructor(stateDir: string, options: HistoryCacheOptions) {
     this.directory = join(stateDir, 'gmail-history');
     this.#now = options.now;
     this.#cap = options.cap ?? HISTORY_CACHE_CAP;
     this.#write = options.write ?? ((path, data) => writeFileAtomic(path, data));
+    // Counted per holder (D4-j): counted from the start, the last of several writers arriving at once gave up while the
+    // lock was being handed on as it should be — on a Windows runner, after five seconds of other processes' changes.
+    this.#lock = {
+      timeoutPerHolder: true,
+      maxWaitMs: options.lockMaxWaitMs ?? HISTORY_LOCK_MAX_WAIT_MS,
+      ...(options.lockTimeoutMs === undefined ? {} : { timeoutMs: options.lockTimeoutMs }),
+    };
   }
 
   get addressesPath(): string {
@@ -187,23 +206,30 @@ export class HistoryCache {
     valid: (value: unknown) => value is T,
     observe: (at: string, expires: string) => Array<[string, T]>,
   ): Promise<void> {
-    await withFileLock(`${path}.lock`, async () => {
-      const now = this.#now();
-      // Malformed or unreadable: replaced, never trusted, by this valid write.
-      const entries = (await this.#read(path, field, valid)) ?? {};
-      // First what has expired — at or before now — so a fresh entry is never evicted in its place.
-      const kept = Object.entries(entries).filter(([, entry]) => Date.parse(entry.expiresAt) > now.getTime());
-      const byKey = new Map<string, T>(kept);
-      for (const [key, entry] of observe(now.toISOString(), new Date(now.getTime() + HISTORY_CACHE_MS).toISOString())) {
-        byKey.set(key, entry);
-      }
-      // Then the oldest observations, the key breaking ties, until the cap: the same order whoever wrote first.
-      const ordered = [...byKey].sort(
-        ([keyA, a], [keyB, b]) =>
-          Date.parse(a.observedAt) - Date.parse(b.observedAt) || (keyA < keyB ? -1 : keyA > keyB ? 1 : 0),
-      );
-      const survivors = ordered.slice(Math.max(0, ordered.length - this.#cap));
-      await this.#write(path, JSON.stringify({ version: 1, [field]: Object.fromEntries(survivors) }));
-    });
+    await withFileLock(
+      `${path}.lock`,
+      async () => {
+        const now = this.#now();
+        // Malformed or unreadable: replaced, never trusted, by this valid write.
+        const entries = (await this.#read(path, field, valid)) ?? {};
+        // First what has expired — at or before now — so a fresh entry is never evicted in its place.
+        const kept = Object.entries(entries).filter(([, entry]) => Date.parse(entry.expiresAt) > now.getTime());
+        const byKey = new Map<string, T>(kept);
+        for (const [key, entry] of observe(
+          now.toISOString(),
+          new Date(now.getTime() + HISTORY_CACHE_MS).toISOString(),
+        )) {
+          byKey.set(key, entry);
+        }
+        // Then the oldest observations, the key breaking ties, until the cap: the same order whoever wrote first.
+        const ordered = [...byKey].sort(
+          ([keyA, a], [keyB, b]) =>
+            Date.parse(a.observedAt) - Date.parse(b.observedAt) || (keyA < keyB ? -1 : keyA > keyB ? 1 : 0),
+        );
+        const survivors = ordered.slice(Math.max(0, ordered.length - this.#cap));
+        await this.#write(path, JSON.stringify({ version: 1, [field]: Object.fromEntries(survivors) }));
+      },
+      this.#lock,
+    );
   }
 }

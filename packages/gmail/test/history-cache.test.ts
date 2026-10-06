@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -444,4 +444,71 @@ test('a write that fails before or around its rename leaves the old file or the 
       else assert.equal(parsed.entries[`${setup.workId} pay@vendor.test`]?.result, 'written');
     });
   }
+});
+
+test('a cache lock handed from holder to holder keeps a change waiting; one holder keeping it, or the overall limit, ends the wait (D4-j)', async (t) => {
+  const at = '2026-10-05T09:00:00.000Z';
+  // A holder of the lock as another process would be: alive, fresh, and known by its token.
+  const hold = (lockPath: string, token: string) =>
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token }));
+  const record = (cache: HistoryCache) =>
+    cache.recordAddresses('ibx_LOCKLOCKLOCKLOCK', new Map([['kept@vendor.test', 'not-written']]));
+  const setup = (lockTimeoutMs: number, lockMaxWaitMs: number) => {
+    const cache = new HistoryCache(tempDir('agent-gmail-history-'), {
+      now: () => new Date(at),
+      lockTimeoutMs,
+      lockMaxWaitMs,
+    });
+    mkdirSync(cache.directory, { recursive: true });
+    return { cache, lockPath: `${cache.addressesPath}.lock` };
+  };
+
+  await t.test(
+    'handed on every 100 ms for three seconds, past a one-second timeout: the change waits, and lands',
+    async () => {
+      const { cache, lockPath } = setup(1000, 20_000);
+      let turn = 0;
+      hold(lockPath, `holder-${turn}`);
+      const handing = setInterval(() => hold(lockPath, `holder-${++turn}`), 100);
+      const change = record(cache);
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      clearInterval(handing);
+      unlinkSync(lockPath);
+      await change;
+      const file = JSON.parse(readFileSync(cache.addressesPath, 'utf8'));
+      assert.equal(Object.keys(file.entries).length, 1, 'the change landed once the lock was free');
+      assert.ok(turn >= 20, `the lock changed hands ${turn} times while the change waited`);
+    },
+  );
+
+  await t.test('kept by one holder past the timeout: the change gives up as a held lock', async () => {
+    const { cache, lockPath } = setup(1000, 20_000);
+    hold(lockPath, 'the-only-holder');
+    try {
+      await assert.rejects(record(cache), (error: unknown) => {
+        assert.equal((error as { code?: unknown }).code, 'LOCK_TIMEOUT');
+        assert.match(String((error as Error).message), /another agent-communications process is holding/);
+        return true;
+      });
+    } finally {
+      unlinkSync(lockPath);
+    }
+  });
+
+  await t.test('handed on for ever: the overall limit ends the wait, busy rather than stuck', async () => {
+    const { cache, lockPath } = setup(1000, 2000);
+    let turn = 0;
+    hold(lockPath, `holder-${turn}`);
+    const handing = setInterval(() => hold(lockPath, `holder-${++turn}`), 100);
+    try {
+      await assert.rejects(record(cache), (error: unknown) => {
+        assert.equal((error as { code?: unknown }).code, 'LOCK_TIMEOUT');
+        assert.match(String((error as Error).message), /overall limit of 2 s/);
+        return true;
+      });
+    } finally {
+      clearInterval(handing);
+      unlinkSync(lockPath);
+    }
+  });
 });
