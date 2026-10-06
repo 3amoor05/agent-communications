@@ -3,7 +3,8 @@
 Status: **revised with the owner's answers on 2026-10-06 and for review round 20; awaiting review round 21.** The
 owner's five answers are folded into the design and listed, with where each landed, in §8. Rounds 1–18 were resolved;
 round 19's two findings are closed in D4, D8, D9 and D12, and §9 records where; round 20's three findings are closed
-in D4/D8 (WhatsApp stage expiry), D11 (runtime lock and integrity) and D11/D2 (operating-system network boundary). Specification only, not an implementation.
+in D4/D8 (WhatsApp stage expiry), D11 (runtime lock and integrity) and D11/D2 (operating-system network boundary), and
+the same stage-deadline rule now covers every source's staging (D8). Specification only, not an implementation.
 Written from the cited research pass (§2) and a checked read of this repository at `90463e1`, whose code is release
 0.13.0. The 2026-10-06 revision's new repository citations are to `6f6a9de4` (release 0.14.0) and say so; files such as
 `packages/core/src/approvals.ts` have moved since `90463e1` (the unions this design describes are unchanged), so phase
@@ -628,15 +629,17 @@ writes only content-free resolution rows and counts/last-resolution health, crea
 those affected projections, and does not emit a source-gap record. Any other transport, provider, decoding,
 sanitisation or schema failure persists `firstFailedAt`, `attempts`, `nextAt` and a stable failure code in encrypted
 source staging and retries with capped exponential backoff and jitter for at most 24 hours from the original
-`firstFailedAt`. At the deadline it resolves each affected projection as `unresolvable`, writes one content-free
-`agentcomms.source.gap` record for the source occurrence and stable failure code, and stops retrying. The record
+`firstFailedAt`, or until the staged content's `stageExpiresAt` if that comes first (D8). At the 24-hour deadline it
+resolves each affected projection as `unresolvable`, writes one content-free `agentcomms.source.gap` record for the
+source occurrence and stable failure code, and stops retrying; at the stage deadline it resolves them
+`retention-expired` instead, with no gap record, as D8's composition rule says. The record
 contains no body, attachment metadata, detail response or provider error text.
 
 Unaffected metadata-only projections over the same occurrence may still be inserted. The provider cursor may advance
 only after every eligible projection is either committed, skipped by its rule/source filters, or has one of those
 terminal materialisation resolutions; it then advances in the same transaction that makes the final outcome durable.
 A terminal resolution is replay-stable and can never become a later event. Restart preserves the original
-`firstFailedAt`, deadline and completed outcomes. This protocol applies equally when Gmail metadata classification
+`firstFailedAt`, both deadlines and completed outcomes. This protocol applies equally when Gmail metadata classification
 succeeds and the message is deleted before a later full read, and when a Resend list row exists but its detail, body
 or attachment response is permanently missing or malformed.
 
@@ -706,8 +709,8 @@ conversation, kind or chat at a time and prove both the digest and classificatio
 | Source | Version 1 | Later |
 |---|---|---|
 | Gmail | Keep exactly one mailbox-level cursor per account and make one unfiltered `users.history.list` scan from its stored `historyId`; the request deliberately omits `labelId`, because Gmail accepts only one singular label filter rather than the union several rules require. Follow every `nextPageToken` before committing the final response's `historyId`, and use the specific change arrays rather than duplicate generic entries. Gmail explicitly warns that messages in a history response will typically contain only `id` and `threadId`, so received/sent classification and selection use the observation-time metadata read below rather than `messagesAdded[].message.labelIds`; labelled events alone use their own change arrays. A 404 re-baselines the one mailbox cursor at `getProfile().historyId` and records `agentcomms.source.gap` for the app/doctor, with no silent backfill. This broader acquisition is disclosed in the UI and follows Gmail's documented pagination and change resources ([`users.history.list`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list), [`History`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history#History), [`Message`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages#Message), [`users.getProfile`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users/getProfile)). | `watch` plus Pub/Sub pull may wake the same reconciliation path; it never replaces `history.list`. |
-| Slack | Poll only the non-empty conversation-id sets named by active rule versions, plus the union scopes held by a nonterminal D12 replacement drain, and promise **top-level posted messages only**, plus the bounded reply reconciliation below. Each conversation has a committed timestamp watermark and a durable scan `{oldest: watermark, latest: cycle-start, cursor}`. Follow every `response_metadata.next_cursor`, even after a short or empty page; a cycle may spend only its workspace request budget, so a cut-short scan persists that exact cursor and boundary and continues next cycle. It commits the new watermark only after the last page and committed ingest. A budget cut, ordinary empty page or `invalid_cursor` alone is never a gap. On `invalid_cursor`, restart the same bounded scan without a cursor; record `agentcomms.source.gap` only when Slack explicitly reports an `is_limited` or equivalent retained-history boundary that excludes the committed watermark. If coverage cannot be established, mark the source degraded and do not advance or record a gap. Posts dedupe on `(channelId, ts)`. The scheduler supports Slack's conservative affected-app limit and learns from 429/`Retry-After`; the UI shows worst-case latency ([`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/), [Slack rate-limit notice](https://docs.slack.dev/changelog/2025/05/29/rate-limit-changes-for-non-marketplace-apps/)). For a thread whose parent was observed within the previous seven days, maintain a separate reply watermark and fully cursor-page `conversations.replies` under the same resumable budget; Slack documents that method as independently cursor-paginated ([`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/)). A replacement drain row for one conversation is therefore an **aggregate barrier**: it is complete only when the conversation's top-level history cursor has covered P and every eligible thread discovered at or below P has a durable reply scan whose own cursor has covered P. The eligible-thread set grows as the bounded top-level drain discovers parents and is frozen only when top-level coverage reaches P; a reply scan deferred by the workspace budget or a 429/`Retry-After`, including one with a saved `next_cursor`, keeps the conversation drain open. Swap and restart may reuse completed child scans but cannot infer their completion from the top-level watermark. **Polling does not emit replies to older threads or any message edits.** Those are documented version-1 polling limits, not silent completeness claims. | Socket Mode needs its own future design (D15); this specification makes no completeness or replay-cursor claim for it. |
-| Resend | `received.list` is paged newest-first toward the stored anchor. A durable scan keeps `{anchorId, cycleHeadId, after, pagesScanned}` between cycles; `cycleHeadId` is the first id seen, and `after` is the last id on the last completed page. Pages are staged encrypted and the anchor advances to `cycleHeadId` only when the old anchor is found and all staged rows commit to ingest or D3's terminal projection resolution. If the anchor is not found within ten pages—because retention or deletion made it unreachable—the daemon purges the stage, atomically re-baselines to `cycleHeadId` and records `agentcomms.source.gap`; it never scans an unbounded history. A required received-email detail/body/attachment 404 resolves affected projections as `vanished`; every other failure retains the anchor and retries for at most 24 hours before `unresolvable`, one content-free source-gap record and cursor progress. The sent list is paged newest-first through every id from the most recent seven days. Those ids have rows in a state table for seven days; each read compares `last_event` with the stored value and emits only a change. The UI says these are observed states, not every intermediate transition. The daemon may consume at most half the machine-wide throttle and an interactive CLI/MCP call always takes the next available slot ([Resend received list](https://resend.com/docs/api-reference/emails/list-received-emails)). | A signed hosted relay for Resend webhooks is a separate product. |
+| Slack | Poll only the non-empty conversation-id sets named by active rule versions, plus the union scopes held by a nonterminal D12 replacement drain, and promise **top-level posted messages only**, plus the bounded reply reconciliation below. Each conversation has a committed timestamp watermark and a durable scan `{oldest: watermark, latest: cycle-start, cursor}`. Follow every `response_metadata.next_cursor`, even after a short or empty page; a cycle may spend only its workspace request budget, so a cut-short scan persists that exact cursor and boundary and continues next cycle. It commits the new watermark only after the last page and committed ingest. A budget cut, ordinary empty page or `invalid_cursor` alone is never a gap. On `invalid_cursor`, restart the same bounded scan without a cursor; record `agentcomms.source.gap` only when Slack explicitly reports an `is_limited` or equivalent retained-history boundary that excludes the committed watermark. If coverage cannot be established, mark the source degraded and do not advance or record a gap. Posts dedupe on `(channelId, ts)`. Any page or occurrence held in `source_scan_state` before ingest is under D8's stage deadline. The scheduler supports Slack's conservative affected-app limit and learns from 429/`Retry-After`; the UI shows worst-case latency ([`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/), [Slack rate-limit notice](https://docs.slack.dev/changelog/2025/05/29/rate-limit-changes-for-non-marketplace-apps/)). For a thread whose parent was observed within the previous seven days, maintain a separate reply watermark and fully cursor-page `conversations.replies` under the same resumable budget; Slack documents that method as independently cursor-paginated ([`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/)). A replacement drain row for one conversation is therefore an **aggregate barrier**: it is complete only when the conversation's top-level history cursor has covered P and every eligible thread discovered at or below P has a durable reply scan whose own cursor has covered P. The eligible-thread set grows as the bounded top-level drain discovers parents and is frozen only when top-level coverage reaches P; a reply scan deferred by the workspace budget or a 429/`Retry-After`, including one with a saved `next_cursor`, keeps the conversation drain open. Swap and restart may reuse completed child scans but cannot infer their completion from the top-level watermark. **Polling does not emit replies to older threads or any message edits.** Those are documented version-1 polling limits, not silent completeness claims. | Socket Mode needs its own future design (D15); this specification makes no completeness or replay-cursor claim for it. |
+| Resend | `received.list` is paged newest-first toward the stored anchor. A durable scan keeps `{anchorId, cycleHeadId, after, pagesScanned}` between cycles; `cycleHeadId` is the first id seen, and `after` is the last id on the last completed page. Pages are staged encrypted, under D8's stage deadline, and the anchor advances to `cycleHeadId` only when the old anchor is found and all staged rows commit to ingest, reach D3's terminal projection resolution or are `retention-expired`. If the anchor is not found within ten pages—because retention or deletion made it unreachable—the daemon purges the stage, atomically re-baselines to `cycleHeadId` and records `agentcomms.source.gap`; it never scans an unbounded history. A required received-email detail/body/attachment 404 resolves affected projections as `vanished`; every other failure retains the anchor and retries for at most 24 hours before `unresolvable`, one content-free source-gap record and cursor progress, unless the stage deadline comes first and gives `retention-expired` (D8). The sent list is paged newest-first through every id from the most recent seven days. Those ids have rows in a state table for seven days; each read compares `last_event` with the stored value and emits only a change. The UI says these are observed states, not every intermediate transition. The daemon may consume at most half the machine-wide throttle and an interactive CLI/MCP call always takes the next available slot ([Resend received list](https://resend.com/docs/api-reference/emails/list-received-emails)). | A signed hosted relay for Resend webhooks is a separate product. |
 | WhatsApp | Snapshot-and-rebuild source using the protocol-key, set-based cut-over contract immediately below. | A file-system notification may wake the same safe snapshot path; it never reads the live store. |
 
 **WhatsApp raw snapshots, identity, visibility and cut-over.** While holding the existing WhatsApp sync lock, the
@@ -779,7 +782,8 @@ projection has not committed, which is the only change an admission row may unde
 retry or restart can then admit or project that key for that version. The transaction also increments a content-free
 `doctor` count of expired WhatsApp first representations with the last expiry time; it records no key, payload or
 sender. Expiry uses database time, and start-up runs it before any source or worker, so daemon downtime counts
-against the deadline. No
+against the deadline. This is D8's stage-deadline rule as it applies to WhatsApp, where the version-specific outcome
+is an admission; a projection admitted from the stage takes its `decisionDeadline` from the same `stagedAt`. No
 normalisation happens in that candidate-write transaction. Only after the pointer/diff transaction commits may
 cleanup delete older generations. If the process restarts before that transaction, the pointer still names the prior
 generation and every other generation is an uncommitted candidate that is discarded; if it restarts after the
@@ -853,18 +857,22 @@ found”, and permanent message deletion makes that a final answer rather than a
 
 Every other failed, unavailable or undecodable metadata read leaves only the raw history occurrence in encrypted
 source-scan staging, with `firstFailedAt`, `attempts`, `nextAt` and a stable error code. It retries with capped
-exponential backoff and jitter for **at most 24 hours from `firstFailedAt`**, preventing the mailbox cursor from
-advancing over it and making no received/sent projection, body fetch or delivery. At that deadline it resolves
+exponential backoff and jitter for **at most 24 hours from `firstFailedAt`**, or until the staged occurrence's
+`stageExpiresAt` if that comes first (D8), preventing the mailbox cursor from
+advancing over it and making no received/sent projection, body fetch or delivery. If the stage deadline comes first
+(or at the same instant), it resolves terminally as occurrence-level `retention-expired` with no gap record (D8). At
+the 24-hour deadline it resolves
 terminally as **`unresolvable`**, writes one content-free `agentcomms.source.gap` record naming the account, source,
 occurrence key and stable failure code (never message content or provider error text), increments the corresponding
-`doctor` count, and stops blocking the cursor. A later replay cannot turn either terminal resolution into an event.
-Until either terminal resolution or one successful read, the occurrence has not acquired an observation-time label
+`doctor` count, and stops blocking the cursor. A later replay cannot turn any terminal resolution into an event.
+Until a terminal resolution or one successful read, the occurrence has not acquired an observation-time label
 set and there is no default-to-received path.
 
 After that metadata read succeeds, any rule-required Gmail full/body/attachment materialisation follows D3's
 projection-scoped protocol independently. Deletion between metadata and the full read yields immediate `vanished`
 for the affected projections; non-404 or malformed responses retry from their original `firstFailedAt` for at most
-24 hours and then yield `unresolvable` plus one content-free gap. Metadata-only projections remain eligible, and the
+24 hours and then yield `unresolvable` plus one content-free gap, unless the staged content's `stageExpiresAt` comes
+first and yields `retention-expired` (D8). Metadata-only projections remain eligible, and the
 single mailbox cursor advances only when every affected projection has committed or terminally resolved.
 
 The same observed label set is the received/sent event body's required `labels` value, filters `inbox` and explicit
@@ -1413,20 +1421,26 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   second is refused as `REPLACEMENT_PENDING` until the first is completed, failed or cancelled. `claimedAt` is
   byte-for-byte core's disclosure `usedAt`, and `completionDeadline` is always that instant plus one hour;
 - `cursors(source, accountId, cursorScope, cursor, updatedAt, PRIMARY KEY(source, accountId, cursorScope))` and
-  `source_scan_state(id PRIMARY KEY, source, accountId, cursorScope, encryptedRecord, updatedAt)` hold encrypted source-specific
-  acquisition continuation, raw pages/occurrences, Gmail metadata-read retry state and staging. Gmail has exactly one
+  `source_scan_state(id PRIMARY KEY, source, accountId, cursorScope, stagedAt?, stageExpiresAt?, encryptedRecord,
+  updatedAt)` hold encrypted source-specific
+  acquisition continuation, raw pages/occurrences, Gmail metadata-read retry state and staging; `stagedAt` and
+  `stageExpiresAt` are present exactly when the record holds provider content, and follow the stage-deadline rule
+  below. Gmail has exactly one
   `cursorScope = "mailbox"` row per account and never an event-type or rule cursor. Content-free
   `source_occurrence_resolutions(source, accountId, occurrenceKey, outcome, resolvedAt, errorCode?,
-  PRIMARY KEY(source, accountId, occurrenceKey))` permits only Gmail's terminal `vanished | unresolvable` outcomes;
-  the latter has one matching source-gap record. Content-free
+  PRIMARY KEY(source, accountId, occurrenceKey))` permits Gmail's terminal `vanished | unresolvable` outcomes and, for
+  Gmail, Slack and Resend, the stage-expiry outcome `retention-expired`; only `unresolvable` has a matching
+  source-gap record. Content-free
   `source_projection_resolutions(source, accountId, occurrenceKey, ruleId, ruleVersion, materializationKey, outcome,
   resolvedAt, errorCode?, PRIMARY KEY(source, accountId, occurrenceKey, ruleId, ruleVersion,
-  materializationKey))` holds D3's Gmail/Resend required-lazy-field terminal `vanished | unresolvable` outcomes;
+  materializationKey))` holds D3's Gmail/Resend required-lazy-field terminal `vanished | unresolvable` outcomes and,
+  for Gmail, Slack and Resend, the stage-expiry outcome `retention-expired`;
   `materializationKey` is the lowercase SHA-256 of the sorted required lazy-field names, never fetched content.
   Retry state including the original `firstFailedAt` remains encrypted in `source_scan_state`; one unresolvable
   source occurrence has one matching content-free source-gap record even when several affected projections resolve.
-  Page/final cursor commit requires every staged occurrence before it to be ingested, skipped by classification, or
-  for every otherwise eligible projection to be present in the applicable terminal-resolution table;
+  Page/final cursor commit requires every staged occurrence before it to be ingested, skipped by classification,
+  resolved at occurrence level, or for every otherwise eligible projection to be present in the applicable
+  terminal-resolution table;
 - `whatsapp_visibility(accountId PRIMARY KEY, version, listsDigest, changedAt)` is the monotonic fence for the
   person-controlled allow/deny lists and D9's journal position: the digest and time of the list state the daemon
   last applied. It contains no list entries; the channel list file remains authoritative.
@@ -1467,7 +1481,8 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   thread found at or below P. The parent conversation row's `drainedAt` is null until its top-level cursor and every
   such independently paginated reply row have covered P; budget deferral or 429 leaves the relevant child and the
   aggregate parent open;
-- content-free `ingest(eventId UNIQUE, installationId, type, version, accountId, dedupeKey, occurredAt, observedAt)`
+- content-free `ingest(eventId UNIQUE, installationId, type, version, accountId, dedupeKey, occurredAt, observedAt,
+  stagedAt)`, where `stagedAt` is the stage-deadline rule's first-staging time,
   plus `ingest_rules(eventId, ruleId, ruleVersion, decisionDeadline, whatsappVisibilityVersion?, whatsappMessageId?,
   encryptedProjection, PRIMARY KEY(eventId, ruleId, ruleVersion))`. Each projection contains only the concrete fields
   referenced by that rule version's deterministic conditions, judge inputs and mapping; the two nullable WhatsApp
@@ -1565,7 +1580,49 @@ observation time as both values; replay, re-evaluation and every regenerated Clo
 than the clock. A retry before ingest commit reuses the staged value. A crash after ingest commit therefore cannot
 change `occurredAt`, the canonical envelope body or its Standard Webhooks signature input.
 
-Each `ingest_rules` projection has only that rule's approved `decisionDeadline`. Evaluation first computes the
+**No staged content outlives an approved ingest retention.** Every source stages some provider content before
+admission or projection: Gmail raw history pages, occurrences awaiting their observation-time metadata read, and
+classified occurrences awaiting a required body or attachment fetch (D3, D4); Resend received pages held across
+cycles until the anchor is found, status-change occurrences, and occurrences awaiting a required detail, body or
+attachment fetch; Slack pages and occurrences held in `source_scan_state` before ingest; the occurrences after P that
+Gmail, Slack and Resend defer during a replacement drain (D12); and WhatsApp first representations (D4). Each such
+record gets two values when it is first written, both fixed from then on. `stagedAt` is the time of the transaction
+that first durably staged any content of that occurrence; a later page, retry or reclassification reuses it.
+`stageExpiresAt` is `stagedAt` plus the **shortest** ingest retention among the rule versions that may be owed the
+occurrence at that moment: every active version under the enabled switch whose account, event type and source scope
+it could still match (before Gmail's classification read, both received and sent rules for that mailbox); every
+version whose nonterminal activation intent has staged a point for that scope; and, during a replacement drain, both
+the old version and the pending new one. That set only shrinks as classification and filtering proceed, so the
+deadline is never moved, and one shared staged copy is never kept for a longer-retention version beyond a shorter
+one's approved retention. Retention keeps that starting point afterwards: a projection's `decisionDeadline` is
+`stagedAt` plus that version's ingest retention, so time spent in staging counts against it, and content ingested in
+the same transaction that first read it has `stagedAt` equal to that commit.
+
+At `stageExpiresAt`, one transaction purges the staged record and records a content-free terminal outcome for every
+owed version that still lacks a committed projection. Where the occurrence has been classified, that is one
+`retention-expired` row per version in `source_projection_resolutions` (Gmail, Slack and Resend), keyed by that
+version's own `materializationKey`. Where it has not—a raw page, or a Gmail occurrence still awaiting its metadata
+read—no version-specific projection identity exists yet, and the single occurrence-level `retention-expired` row in
+`source_occurrence_resolutions` is that outcome for every owed version. For WhatsApp it is the `expired` admission
+(D4). Either kind counts as terminal for cursor progress, exactly like `vanished`. The transaction writes no
+source-gap record, because the occurrence was observed and deliberately dropped under an approved retention, not lost
+by the provider; it increments a per-source content-free `doctor` count with the last expiry time. No later page,
+retry, drain or restart can project that occurrence for that version. Expiry uses database time, and start-up runs it
+for every source before any source, worker, control request or replay, so daemon downtime counts against the
+deadline. Content-free continuation—cursors, page tokens, anchors, attempt counters and `firstFailedAt`—may outlive
+its content and is not staging; nor is Resend's seven-day status table, which holds only an email id and its last
+observed status.
+
+**The 24-hour retry window and the stage deadline compose.** Gmail's metadata-read retry (D4) and D3's required
+lazy-materialisation retry each run for at most 24 hours from `firstFailedAt`, and the content they hold must also go
+at its `stageExpiresAt`. Whichever deadline comes first decides the outcome: the retry deadline first gives
+`unresolvable` with its one content-free source-gap record; the stage deadline first gives `retention-expired` with
+no gap record; at exactly the same instant `retention-expired` wins, because purging under the approved retention is
+the stricter outcome. Either way retrying stops, the staged content is purged in the resolving transaction, and the
+cursor may advance once every other eligible projection is committed or terminal.
+
+Each `ingest_rules` projection has only that rule's approved `decisionDeadline`, measured from `stagedAt` as above.
+Evaluation first computes the
 terminal outcome and, for a match, the **complete delivery set for every matched target** in memory from that retained
 projection: mapping, provenance, CloudEvent bytes, target keys, exact bound versions, deadlines and encrypted payloads
 are all ready before the write transaction begins. One SQLite transaction then (1) inserts the one terminal
@@ -1712,8 +1769,9 @@ already crossed `disclosing`; it releases reservations, purges payloads and can 
 disable and re-enable protocol that advances this fence is D12.
 
 Decision metadata defaults to 90 days; ingest content, holds, delivery, SSE replay and dead-letter payload default to
-seven days; dry-run defaults to, and is capped at, 24 hours (D2). A WhatsApp staged first representation has no
-retention of its own: it expires at D4's `stageExpiresAt`, the shortest ingest retention that applies to it. The person may shorten any retention through D2's
+seven days; dry-run defaults to, and is capped at, 24 hours (D2). Staged source content of any source, including a
+WhatsApp first representation, has no retention of its own: it expires at its `stageExpiresAt`, the shortest ingest
+retention that applies to it, and ingest retention runs from the same `stagedAt` (above). The person may shorten any retention through D2's
 whitelist; validation still enforces `hold <= ingest`. Raising one needs a new standing authorisation. Expiry workers use
 database time/deadlines, D7's decision-metadata purge transition and terminal payload transitions, not best-effort
 deletion jobs.
@@ -1962,7 +2020,8 @@ its immutable authorisation-activation id, the active pointer's `currentCutoverI
 points selected by that current id, every superseded version that still owns retained work, pending activation and
 pending-completion intents (including any claimed rule replacement draining to P or `enable-all` activation awaiting
 source positions), terminal failed activations and their audit code, Gmail metadata-read and Gmail/Resend lazy-
-materialisation retry age plus `vanished`/`unresolvable` counts and last resolutions, and source lag,
+materialisation retry age plus `vanished`/`unresolvable`/`retention-expired` counts and last resolutions per
+source, and source lag,
 leases, held decisions, dead letters, retention deadlines and missing secrets. It also reports each judge kind's
 enablement version or `disabled`, the Laya manifest id, runtime-lock digest, runtime and model state and the network
 boundary in use (or why none applies), and, for each WhatsApp account,
@@ -2340,7 +2399,9 @@ replacement constraint in D8 is checked at prepare, claim and finalisation.
 3. **Drain the old version to P.** This step exists only for an enabled exact replacement. Ordinary source work
    continues with the old version, still the active pointer. On each Gmail, Slack or Resend shared or old-only scope,
    occurrence and cursor commits may process that version only through inclusive P; occurrences after P remain
-   encrypted in source staging and cannot create a projection until the swap. The commit that reaches P records
+   encrypted in source staging and cannot create a projection until the swap. Their stage deadline (D8) counts both
+   versions as owed, so an after-P occurrence that reaches it first is `retention-expired` for both and the drain
+   does not wait for it. The commit that reaches P records
    `drainedAt` in the same transaction. For WhatsApp, the daemon instead resolves, through an old-version admission,
    every key the old version is owed at P: each key of the baseline set and each key staged by an earlier generation
    that still lacks an old-version admission, wherever eligible under the old version's lower point. Step 2's pass
@@ -2848,6 +2909,25 @@ any kind is callable before E, and none afterwards until the person enables its 
   content-free source-gap). Restart before and after each terminal write preserves `firstFailedAt`, never fetches or
   projects again after resolution, lets unaffected metadata-only projections succeed and advances the cursor only
   after every affected projection is terminal.
+- **Stage deadlines, every source:** Gmail, Resend and Slack each run this matrix here; WhatsApp's runs under Sources.
+  With two owed rule versions whose ingest retentions differ, every staged record's `stagedAt` and `stageExpiresAt`
+  are fixed at first staging, at the shorter retention, and never move as classification narrows the owed set.
+  Injected time one tick before, exactly at and after the deadline covers three cases. Expiry before admission: a
+  Gmail raw history page and a Gmail occurrence awaiting its metadata read; a Resend received page held across cycles
+  before its anchor is found, and a Resend status-change occurrence; a Slack page or occurrence held before ingest.
+  Each purges the content, records occurrence-level `retention-expired`, ingests nothing and lets the cursor advance.
+  Expiry before projection: a Gmail or Resend occurrence awaiting a required body, detail or attachment fetch records
+  per-version `retention-expired`, while an unaffected metadata-only projection over the same occurrence still
+  commits. Expiry during a replacement: an after-P occurrence deferred by a Gmail, Slack or Resend drain expires for
+  both versions and the drain completes. Every case also runs with a restart before, during and after the expiry
+  transaction, and with the daemon stopped past the deadline, whose start-up expires the record before any source,
+  worker, control request or replay runs. The composition matrix puts the 24-hour retry deadline before, at and after
+  the stage deadline for Gmail metadata reads and for Gmail and Resend lazy fetches: the earlier retry deadline gives
+  `unresolvable` with one gap record, the earlier stage deadline gives `retention-expired` with none, and a tie gives
+  `retention-expired`; nothing is retried afterwards. A projection created after time in staging has
+  `decisionDeadline = stagedAt +` its retention. No expiry writes content, a source-gap record or provider error
+  text; database, WAL and free-page scans find none of the purged bytes; and `doctor` shows each source's count.
+  Cursors, page tokens, anchors and retry counters may outlive their content and hold none of it.
 - **Tightening and account revocation:** generated old/new documents exercise D2's six no-approval edits and assert
   that edit's stated invariant and exact-or-derived authorisation lineage. Every condition/constant/pointer edit and every new target/subscriber/judge version is
   pending even when `plain → enveloped` or an approved address set narrows; revoking an object immediately blocks its
@@ -3284,6 +3364,15 @@ Round 20 found three further items in the 2026-10-06 revision; each is closed:
    replacement remains only as defence in depth. Landed in D11, D2's `SECURITY.md` text, D13, D15, §7 risk 8, §5 and
    §2.
 
+6. **Closed before round 21: Gmail, Resend and Slack staging could outlive a shorter ingest retention.** The rule
+   from item 3 is now general: every source's staged content gets a fixed `stageExpiresAt` at the shortest ingest
+   retention among the versions that may be owed it, expiry purges it and records content-free `retention-expired`
+   outcomes, ingest retention runs from the same `stagedAt`, and the 24-hour retry window and the stage deadline
+   compose with the earlier one deciding and a tie going to `retention-expired`. Landed in D8 (the rule, the
+   composition, `source_scan_state`, both resolution tables, `ingest.stagedAt`), D3, D4 (Gmail metadata and lazy
+   retries, the Resend and Slack rows, WhatsApp), D12 (after-P staging), D10 (`doctor`), Appendix A.1 and §5's
+   "Stage deadlines, every source".
+
 ## Appendix A. Version-1 event catalogue (normative)
 
 This appendix is the complete version-1 source-event contract. D3's `EventDefinition` objects, generated JSON Schema,
@@ -3367,9 +3456,10 @@ body is `""` with `bodyTruncated: false`, an email with no attachments has
 `hasAttachments: false, attachments: []`, and a requested Resend attachment list may be `[]`. Thus “not fetched” is
 never represented as `null` and cannot be disclosed accidentally as provider data. A required Gmail or Resend lazy
 fetch returning 404 resolves only its affected projections as `vanished`; every other failure follows D3's persisted
-backoff for at most 24 hours and then resolves them `unresolvable` with one content-free source-gap record. Either
+backoff for at most 24 hours and then resolves them `unresolvable` with one content-free source-gap record, or
+resolves them `retention-expired` with no gap record if D8's stage deadline comes first. Any
 terminal outcome lets the source cursor advance once every other eligible projection is committed, skipped or
-terminally resolved; restart never resets the deadline.
+terminally resolved; restart never resets either deadline.
 For metadata patterns, an optional property or nullable parent contributes no concrete pointer when absent or null;
 when present, the terminal values named by every pattern below have the declared non-null scalar type.
 
