@@ -4,7 +4,8 @@ Status: **revised with the owner's answers on 2026-10-06 and for review round 20
 owner's five answers are folded into the design and listed, with where each landed, in §8. Rounds 1–18 were resolved;
 round 19's two findings are closed in D4, D8, D9 and D12, and §9 records where; round 20's three findings are closed
 in D4/D8 (WhatsApp stage expiry), D11 (runtime lock and integrity) and D11/D2 (operating-system network boundary), and
-the same stage-deadline rule now covers every source's staging (D8). Specification only, not an implementation.
+the same stage-deadline rule now covers every source's staging, with every content-bearing deadline capped in D8's
+retention table. Specification only, not an implementation.
 Written from the cited research pass (§2) and a checked read of this repository at `90463e1`, whose code is release
 0.13.0. The 2026-10-06 revision's new repository citations are to `6f6a9de4` (release 0.14.0) and say so; files such as
 `packages/core/src/approvals.ts` have moved since `90463e1` (the unions this design describes are unchanged), so phase
@@ -274,7 +275,9 @@ contains all of:
   every content-bearing value is seven days except dry-run, which keeps its 24-hour default and cap, and decision
   metadata, which holds no content, is 90 days. SSE replay is capped at seven days, so its default is also its cap.
   Raising any cap or retention is a loosening. Saving refuses `hold retention > ingest retention`, so a hold can never
-  extend the life of that rule version's own encrypted projection; the equal seven-day defaults satisfy it.
+  extend the life of that rule version's own encrypted projection; the equal seven-day defaults satisfy it. At run
+  time D7 also caps each hold at its projection's own ingest deadline, and the preview states, from D8's retention
+  table, how long each kind of content under the rule can exist.
 
 Golden digest vectors cover all four document kinds. Rule vectors change one field at a time, including an account
 id, a newly connected but unselected account, each source option, an ordinary URL path, a secret-URL fingerprint,
@@ -1224,10 +1227,15 @@ its approved retention deadline. A cap-exhausted delivery waits without an attem
 its retention deadline makes it terminal.
 
 **Retention is terminal.** Rule validation refuses a hold window longer than that rule's ingest window. A held
-decision receives `holdExpiresAt` from the approved hold window, default seven days; if no person resolves it by then,
-one transaction records terminal outcome `hold-expired` and purges that rule version's encrypted event projection,
-creating no delivery and retaining nothing on behalf of another rule. Every delivery has an approved
-absolute retention deadline independent of its retry
+decision keeps that version's projection, whose life is the ingest retention, so when the hold is created its
+deadline is fixed as `holdExpiresAt = min(hold creation + hold retention, stagedAt + that version's ingest
+retention)`, and the decision records which bound applies in `holdBoundBy` (`hold-window` or `ingest-retention`; a
+tie is `ingest-retention`). Neither value is ever extended. If no person resolves the hold by then, one transaction
+records the terminal outcome—`hold-expired` when the hold window bound it, `retention-expired` when the ingest
+retention did—purges that rule version's encrypted projection, creates no delivery, retains nothing on behalf of
+another rule and leaves only the content-free decision row; a resolution arriving after that instant is refused.
+Every delivery has an approved absolute retention deadline, `expiresAt` = its creation in the decision transaction
+plus the delivery retention, independent of its retry
 or rate-cap schedule. If it has not crossed to `disclosing` before that deadline—including because it waited behind a
 rate cap—it becomes terminal `retention-expired` and its encrypted record is purged. Cancelling a delivery records
 `cancelled` and purges its encrypted record in the **same** transaction. Webhook payloads are purged after a 2xx; SSE
@@ -1236,7 +1244,8 @@ Every rule, target, subscriber or judge revocation that purges deliveries or SSE
 `dryrun_log` rows in the same transaction. A webhook that exhausts attempts before its delivery
 deadline becomes `dead-lettered`; its encrypted payload remains only for the separately approved dead-letter
 retention, default seven days, then is purged, and `delivery drop` purges it immediately. When one decision has
-multiple targets, each target copy reaches its own terminal outcome and deadline.
+multiple targets, each target copy reaches its own terminal outcome and deadline. D8's retention table lists every
+content-bearing record's start, cap and outcome together.
 
 `delivery retry` is only a scheduling operation over a webhook delivery whose current state is `retryable`. In one
 transaction it rechecks the original attempt limit, absolute delivery deadline, that the bound rule version is not
@@ -1512,7 +1521,7 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   row, and `expired` is terminal and content-free. A row belonging to one rule version can neither
   satisfy nor conflict with one for another version. Projection, decision and delivery idempotency is therefore per
   `(rule version, occurrence)`, even though the content-free ingest identity for the raw occurrence is shared;
-- `decisions(id PRIMARY KEY, eventId, accountId, ruleId, ruleVersion, whatsappMessageId?, outcome, holdExpiresAt?, metadataExpiresAt, metadataState,
+- `decisions(id PRIMARY KEY, eventId, accountId, ruleId, ruleVersion, whatsappMessageId?, outcome, holdExpiresAt?, holdBoundBy?, metadataExpiresAt, metadataState,
   purgedAt?, encryptedRecord?, UNIQUE(eventId, ruleId, ruleVersion))`, where the optional record holds the expiring
   judge result and reason rather than placing them in plaintext columns;
 - `deliveries(id PRIMARY KEY, decisionId, accountId, ruleId, ruleVersion, whatsappVisibilityVersion?, whatsappMessageId?, targetKey NOT NULL,
@@ -1628,7 +1637,8 @@ projection: mapping, provenance, CloudEvent bytes, target keys, exact bound vers
 are all ready before the write transaction begins. One SQLite transaction then (1) inserts the one terminal
 decision, (2) inserts every delivery in that complete set, and only then (3) purges that rule projection. A no-match,
 `retention-expired` or resolved `hold-expired` terminal outcome uses the same transaction with an empty delivery set.
-A nonterminal held decision retains its projection until the later resolution transaction can perform this sequence.
+A nonterminal held decision retains its projection until the later resolution transaction can perform this sequence,
+or until its fixed `holdExpiresAt` (D7) ends it.
 There is no committed state in which a terminal matched decision exists without all of its target deliveries, or in
 which the projection is gone before their creation.
 
@@ -1775,6 +1785,31 @@ retention that applies to it, and ingest retention runs from the same `stagedAt`
 whitelist; validation still enforces `hold <= ingest`. Raising one needs a new standing authorisation. Expiry workers use
 database time/deadlines, D7's decision-metadata purge transition and terminal payload transitions, not best-effort
 deletion jobs.
+
+**Every content-bearing deadline in one place.** Each record that can hold event content has one end, fixed when the
+record is created and never extended; a D2 tightening can only end it sooner. A record created further along starts
+a clock of its own only where the person approved a separate retention for it in the rule's activation (D2);
+everything else is capped at the content's `stagedAt` plus the applicable ingest retention.
+
+| Record | Holds | Clock starts | Ends at | Approved retention | At the end |
+|---|---|---|---|---|---|
+| Staged source content, every source | provider content before admission or projection | `stagedAt` | `stageExpiresAt` = `stagedAt` + the shortest owed ingest retention; a failing fetch also stops at `firstFailedAt` + 24 hours, the earlier deciding | ingest | purged; `retention-expired` (WhatsApp `expired`), or `unresolvable` if the retry deadline came first |
+| Rule projection (`ingest_rules`) | that version's own fields | `stagedAt` | `decisionDeadline` = `stagedAt` + ingest retention | ingest | purged; decision `retention-expired` if still undecided |
+| Held decision, keeping its projection | the projection | hold creation | `holdExpiresAt` = min(hold creation + hold retention, `stagedAt` + ingest retention) | hold, capped by ingest | purged, no delivery; `hold-expired`, or `retention-expired` where the ingest cap bound it |
+| Delivery: `queued`, `retryable`, or `disclosing` before crossing | the target payload | delivery creation, in the decision transaction | `expiresAt` = creation + delivery retention | delivery, separate | purged; `retention-expired`; a webhook 2xx purges at once |
+| Dead-letter payload | the target payload | dead-lettering | + dead-letter retention | dead-letter, separate | purged; `delivery drop` purges sooner |
+| Dry-run row (`dryrun_log`) | the CloudEvent bytes | append | + dry-run retention, at most 24 hours | dry-run, separate, capped | purged |
+| SSE entry (`stream_log`) | the CloudEvent bytes | append | + SSE replay retention, at most seven days | SSE replay, separate, capped | purged |
+| Decision metadata | outcome, judge value and reason code; no sender content | decision | + decision-metadata retention | decision metadata, separate | cleared; uniqueness tombstone kept |
+| Installation-reset delivery | reset metadata only; no content | creation | + 24 hours, fixed (D7) | fixed by this design | `dead-lettered` or `retention-expired`; barrier degraded |
+
+Identity rows hold no event content and are outside the table: the ingest tombstone, resolution rows, cursors and
+continuation, and WhatsApp's snapshot keys and occurrence ledger, whose raw chat and sender identifiers stay for
+idempotency until account removal or an installation reset. Because each separate retention starts where the stage
+before it ends, the longest any content can exist under one rule is the ingest retention from `stagedAt` (within which
+every hold ends), then the delivery retention, then either the dead-letter retention or, for dry-run and SSE, their
+own retention from append. With the defaults that is at most 21 days for a webhook or SSE payload and 14 days plus 24
+hours for a dry-run row. Every activation preview states these maxima for the rule's own targets and retentions.
 
 ### D9. Authoritative event state and the config boundary
 
@@ -3016,6 +3051,15 @@ any kind is callable before E, and none afterwards until the person enables its 
   after expiry fail without recovering bytes. Every ordering of ingest, hold, delivery, dry-run, dead-letter and
   decision-metadata deadlines proves no deadline extends another; at 90 days or the approved shorter value the
   decision purge clears expiring metadata, retains only the uniqueness tombstone and cannot trigger re-evaluation.
+  Every row of D8's retention table is tested at its cap: injected time one tick before, exactly at and after each
+  record's fixed end, also across a restart and with the daemon stopped past the end, proves the content is gone at
+  that end and that no record starts its clock earlier or later than the table says. Holds: one created soon after
+  staging ends `hold-expired` at its window; one created late enough that `stagedAt` + ingest retention comes first
+  ends `retention-expired` at that instant, purged with no delivery; equal ends give `retention-expired`;
+  `holdExpiresAt` and `holdBoundBy` never change after creation; and a resolution one tick after the end is refused.
+  Deliveries, dead letters, dry-run rows and SSE entries each end exactly at their own approved retention from the
+  stated start; a delivery created on the last tick of ingest retention still gets its full delivery retention and
+  no more; and the activation preview's stated maxima equal the table's sums for that rule's targets and retentions.
 - **Encryption and installation reset:** packed-record round trips for every encrypted column in per-rule ingest
   projections, source staging, decisions, deliveries, dry-run log, reset delivery and stream log;
   record-version/key-id parsing; exact AAD golden vectors for a single-key `decisions` row and a composite-key
@@ -3372,6 +3416,12 @@ Round 20 found three further items in the 2026-10-06 revision; each is closed:
    composition, `source_scan_state`, both resolution tables, `ingest.stagedAt`), D3, D4 (Gmail metadata and lazy
    retries, the Resend and Slack rows, WhatsApp), D12 (after-P staging), D10 (`doctor`), Appendix A.1 and §5's
    "Stage deadlines, every source".
+7. **Closed before round 21: a hold measured from decision time could outlive the ingest retention.** Each hold's
+   deadline is now `min(hold creation + hold retention, stagedAt + ingest retention)`, fixed at creation with the
+   bound recorded, and the ingest cap ends it as `retention-expired`, purged with only the content-free decision row
+   left. D8's new retention table gives every content-bearing record's start, cap and outcome, marks which ones have
+   a separately approved retention, and states the end-to-end maxima the preview shows. Landed in D7, D8 (`decisions`,
+   the held-decision sentence, the table), D2 (retention bullet) and §5 "Retention".
 
 ## Appendix A. Version-1 event catalogue (normative)
 
