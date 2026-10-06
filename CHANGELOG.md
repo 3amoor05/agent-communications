@@ -3,6 +3,22 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.14.1
+
+**Connecting Slack through your organisation's app works when your browser is in another workspace.** An
+organisation's Slack app is made in its own workspace and is not distributed, so Slack will sign you in to it only
+there. The sign-in link did not say which workspace that was, so Slack used whichever one your browser was last in:
+someone also signed in to a second workspace got "Something went wrong when authorizing this app" with
+`invalid_team_for_non_distributed_app` on Slack's page, and the sign-in never came back. Now:
+- **The link names the workspace.** A sign-in through an organisation profile, and every `workspace reauth`, carries
+  the workspace's id (`team=T…`), so a browser already signed in to it goes straight there. Connecting your own app for
+  the first time is unchanged: which workspace it belongs to is only known once Slack answers.
+- **A sign-in that never comes back says why it may not have.** When a profile sign-in times out, the message now
+  says that if Slack's page showed `invalid_team_for_non_distributed_app`, the browser was in another workspace: sign
+  in to the one the profile names, in that browser, and start again. Before, it said only to ask an administrator.
+- If you are not signed in to that workspace in the browser at all, Slack asks you to choose one and ignores the
+  link's: choose your organisation's. `docs/troubleshooting.md` has the steps.
+
 ## 0.14.0
 
 **Approving a send no longer races the clock.** One email to a colleague, from Claude Code, took four attempts and
