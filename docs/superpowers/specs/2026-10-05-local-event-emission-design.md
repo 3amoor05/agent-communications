@@ -1,8 +1,12 @@
 # Local event emission — design
 
-Status: **frozen after review round 19, pending the owner** — five questions (§8) and two open review items (§9). Rounds
-1–18 are resolved; round 19's two findings are recorded, with their intended direction, rather than designed here. Specification only, not an implementation.
-Written from the cited research pass (§2) and a checked read of this repository at `90463e1`.
+Status: **revised with the owner's answers on 2026-10-06; awaiting review round 20.** The owner's five answers are
+folded into the design and listed, with where each landed, in §8. Rounds 1–18 were resolved; round 19's two findings
+are still open in §9. Specification only, not an implementation.
+Written from the cited research pass (§2) and a checked read of this repository at `90463e1`, whose code is release
+0.13.0. The 2026-10-06 revision's new repository citations are to `6f6a9de4` (release 0.14.0) and say so; files such as
+`packages/core/src/approvals.ts` have moved since `90463e1` (the unions this design describes are unchanged), so phase
+planning re-resolves the older line numbers.
 This design adds a new **standing disclosure authorisation**; it does not treat recurring event delivery
 as the existing per-content send gate
 (`docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:18-19`). CLI–MCP parity still holds, with explicit
@@ -25,6 +29,8 @@ reads, and for a design of everything that takes:
 - **Full control:** the person can enable and disable all of it from the app.
 - **Structure:** this may mean the repository becomes a monorepo of separately published apps, with "very complex and
   clear separations of principles".
+
+The owner's answers of 2026-10-06 to the questions this raised are in §8.
 
 ## 2. What is true, and was checked
 
@@ -53,6 +59,15 @@ reads, and for a design of everything that takes:
 | Core approval records are kind-separated, compare-and-swap under a per-record lock and single-use through an `O_EXCL` claim marker; the present kind union is `send | change | download`. This design extends that machinery rather than treating an ordinary change approval as disclosure authority. | `packages/core/src/approvals.ts:20-54,801-813` |
 | Core already provides lowercase SHA-256 and recursively key-sorted canonical JSON; the event and disclosure identities below reuse those exact primitives. | `packages/core/src/digest.ts:99-100,117-127` |
 
+### In this repository (at `6f6a9de4`, checked 2026-10-06)
+
+| Fact | Source |
+|---|---|
+| WhatsApp's `allow`, `deny` and `clear` refuse an agent and change one account's lists through `ChatListStore.update`, which loads the file, applies the change and atomically rewrites `whatsapp-chats.json` while holding the lock file `.whatsapp-chats.lock`. A missing file is empty lists; a file that cannot be read or parsed refuses every read. `forget` drops an account's entry when the account is removed. Only the WhatsApp package writes this file, and it never opens the events database. | `packages/whatsapp/src/lists.ts:27-31,64-67,97-140`; `packages/whatsapp/src/operations/chat-lists.ts:93-121`; `packages/whatsapp/src/operations/accounts.ts:157` |
+| `syncAccount` holds the account's sync lock, copies and checks the store, rebuilds the index through `Visibility` (rebuilding again if the lists change before replacement) and disposes the checked copy in a `finally`, so nothing derived from that copy survives unless it was committed before disposal. | `packages/whatsapp/src/operations/sync.ts:48-115` |
+| The pnpm workspace contains only `packages/*`, runs no dependency install script unless `allowBuilds` lists it (the list is empty) and refuses versions younger than a day. The npm release workflow runs on `v*` tags and refuses to publish from a private repository because provenance needs a public one. | `pnpm-workspace.yaml:1-15`; `.github/workflows/release.yml:27-30,139-142` |
+| Core installs a managed runtime as one exact package version with `npm install --prefix <dataDir>/runtime/<version>-<package> --save-exact`; `dataDir` is the managed-runtime root and is machine-local, not roaming, on Windows. | `packages/core/src/mcp-install.ts:337-339,482-521`; `packages/core/src/paths.ts:63-72,111-121` |
+
 ### Outside it (checked 2026-10-05; first-party or primary sources)
 
 | Fact | Source |
@@ -64,7 +79,6 @@ reads, and for a design of everything that takes:
 | JSON Pointer has no wildcard; tokens escape `~` as `~0` and `/` as `~1`. Native `EventSource` accepts a URL and `withCredentials`, not an arbitrary Authorization header. | [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901), [HTML Standard: server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html) |
 | JSON Schema 2020-12 defines `maxLength` in JSON characters (Unicode code points), while ECMAScript string indexing, `length` and `slice` operate over UTF-16 code units; a non-BMP code point therefore occupies two ECMAScript string elements and a code-unit slice can split its surrogate pair. | [JSON Schema validation §6.3.1](https://json-schema.org/draft/2020-12/json-schema-validation#section-6.3.1), [ECMAScript 2024 string type](https://tc39.es/ecma262/2024/multipage/ecmascript-data-types-and-values.html#sec-ecmascript-language-types-string-type), [ECMAScript `String.prototype.slice`](https://tc39.es/ecma262/2024/multipage/text-processing.html#sec-string.prototype.slice) |
 | TypeSafe documents Jev through its hosted System One API, Noul as a 0–1 yes/no probability, and current model limits, but the reviewed published artefacts and terms provide no local weights or self-hosting contract. Ollama also returns a 0–1 probability for Noul. | [TypeSafe quick start](https://docs.typesafe.ai/introduction/quickstart), [TypeSafe models](https://docs.typesafe.ai/models), [Ollama decisions](https://docs.ollama.com/capabilities/decision) |
-| The documented near-name is Laya, from a different publisher. Its published usage is a Transformers-style decision head and it offers an ONNX Runtime extra. | [Laya model page](https://huggingface.co/convaiinnovations/laya) |
 | Tauri capabilities grant permissions to named windows/webviews, and overlapping capabilities merge their authority. Registered custom commands are available to all windows/webviews unless the application declares them with `AppManifest::commands`; a React route is not a capability boundary. | [Tauri capabilities](https://v2.tauri.app/security/capabilities/) |
 | Tauri's CSP protection is enabled only when `security.csp` is configured; the generated configuration shows `csp: null`. Its documented IPC origins are `ipc:` and `http://ipc.localhost`. Tauri normally keeps compile-time asset CSP modification on (`dangerousDisableAssetCspModification: false`) and adds hashes/nonces for bundled assets. | [Tauri CSP](https://v2.tauri.app/security/csp/), [Tauri security configuration](https://v2.tauri.app/reference/config/#securityconfig) |
 | Frontend calls to Rust commands serialise arguments and return values across Tauri IPC. Secret entry and reveal-once therefore necessarily cross IPC when the app uses a frontend secret window; the enforceable boundary is which labelled window has that command capability and where those bytes may subsequently appear. | [Tauri commands](https://v2.tauri.app/develop/calling-rust/) |
@@ -74,6 +88,24 @@ reads, and for a design of everything that takes:
 | AES-GCM recommends 96-bit IVs. For randomly generated IVs, NIST caps all authenticated-encryption invocations under one key at 2^32; this design applies that limit separately to each derived table subkey and rotates before reaching it. | [NIST SP 800-38D, §§5.2.1.1 and 8.3](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38d.pdf) |
 | IANA's IPv4 and IPv6 special-purpose registries identify whether a range is globally reachable; `169.254.0.0/16` and `fe80::/10` are Link Local, while `fc00::/7` is Unique-Local. AWS documents EC2 metadata at `169.254.169.254` and `fd00:ec2::254`. | [IANA IPv4 registry](https://www.iana.org/assignments/iana-ipv4-special-registry), [IANA IPv6 registry](https://www.iana.org/assignments/iana-ipv6-special-registry), [AWS EC2 instance metadata](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html) |
 | Slack describes the Events API used by Socket Mode as best effort, with acknowledgement retries rather than a replay cursor. QStash deduplication IDs last ten minutes. EventBridge `PutEvents` can return HTTP 200 while individual entries fail, and callers must inspect every result entry. | [Slack Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/), [Slack Events API](https://docs.slack.dev/apis/events-api/), [QStash publish API](https://upstash.com/docs/qstash/api-reference/messages/publish-a-message), [EventBridge `PutEvents`](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-putevents.html) |
+
+### Laya, ONNX Runtime, the CUE++ packages and unsigned distribution (checked 2026-10-06)
+
+The owner confirmed that "Leia" means Laya (§8). Every row was checked on 2026-10-06 against the publisher's own
+repository, registry entry or documentation; content read there was treated as data.
+
+| Fact | Source |
+|---|---|
+| Laya, by Convai Innovations, is a non-autoregressive "System 1" decision model: given a state and typed `choice`, `score` or `noul` questions, it returns typed answers with probabilities in one forward pass and generates no text. Its code is Apache-2.0 (GitHub `NandhaKishorM/laya`, created 2026-09-18, latest tag `v0.3.28` of 2026-10-05). The Python package `laya` 0.3.28 (Apache-2.0, Python ≥ 3.10, 36 releases) has `onnx` and `serve` extras; `laya-serve` exposes TypeSafe Jev's `POST /v1/systemone` request and response shape and binds `0.0.0.0` with no authentication unless `LAYA_API_KEY` is set. | [`NandhaKishorM/laya`](https://github.com/NandhaKishorM/laya) (`gh api` repository, releases and tags), [PyPI `laya`](https://pypi.org/project/laya/), [model card](https://huggingface.co/convaiinnovations/laya) |
+| The weights are Apache-2.0 on Hugging Face (`convaiinnovations/laya`, card licence `apache-2.0`, revision `7b928d828b7b0e022f929d9bd2e44165aa270148` of 2026-10-03) and are published as safetensors only, with no ONNX file. The English checkpoint is ModernBERT-large (`answerdotai/ModernBERT-large`, Apache-2.0) plus a decision head: 421M parameters, a 512-token context, `model.safetensors` of 842,609,210 bytes with SHA-256 `891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c`, unchanged since 2026-09-19 (every later commit changes only documentation or configuration). The multilingual checkpoint (`multilingual/` there, and `convaiinnovations/laya-multilingual`, Apache-2.0) is mmBERT-base (`jhu-clsp/mmBERT-base`, MIT): 322M parameters, 643,835,514 bytes. | Hugging Face model API for those four repositories; the `convaiinnovations/laya` commit list and `paths-info` for `model.safetensors` at `c5d78730` (2026-09-19) and `7b928d82` |
+| The card states its own limits. The model "ships over-confident": refitting one temperature per question type and option count moves mean expected calibration error from 0.466 to 0.081, and the card says to "do this on your own data before trusting the probabilities". `noul` "can follow its option labels instead of the state, most strongly on this English checkpoint" (issue #156); the stated workaround is a two-option `choice` with neutral keys. Options share a 192-token head budget, so more than about 20 options degrade, and `act_probability` "carries no usable signal yet". | [Model card](https://huggingface.co/convaiinnovations/laya), "Limits", at `7b928d82` |
+| The official TypeScript runtime `laya-ts` 0.1.0 (Apache-2.0, ESM, with `onnxruntime-node`/`onnxruntime-web` optional) is in that repository but **not on npm**: an anonymous `npm view laya-ts` returned 404. It loads a split `encoder.onnx` and `head.onnx`, which must first be exported from the checkpoint with Python and PyTorch because Convai publishes no ONNX files; it accepts a pinned revision and an opt-in per-file SHA-256 map. | `NandhaKishorM/laya`: `laya-ts/package.json`, `laya-ts/README.md`, `laya-ts/src/agent.ts:841-858`, `laya-ts/src/providers.ts:334-348`; `npm view laya-ts` |
+| `@receptron/laya` 0.1.2 (MIT; first published 2026-09-19, last changed 2026-09-21; Node ≥ 20; depends on `onnxruntime-node` `^1.22.0` and `@huggingface/tokenizers` `^0.2.0`) runs Laya from Node through ONNX Runtime with Jev's `system_one` request and response shape, and states that its output matches the Python implementation to four decimal places. `Laya.load({ modelDir })` reads only that directory; without `modelDir`, its own downloader fetches from Hugging Face, defaults to revision `main`, follows redirects and compares only file sizes. Its README gives about 1.7 GB of fp32 weights on first use, roughly 2 GB of RAM, about 140 ms for three questions on a warm Apple-silicon CPU, and a 512-token state. Open issues #10 and #11 report that a `choice:11+` temperature of 0.1006 makes answers with eleven or more options about 99% confident. | [npm `@receptron/laya`](https://www.npmjs.com/package/@receptron/laya) (`npm view`); [`receptron/laya`](https://github.com/receptron/laya): README, `src/laya.ts:41-57`, `src/download.ts:15-67`, commits and issues |
+| Its default bundle is a separate third-party export, Hugging Face `receptron/laya-onnx` (card licence `apache-2.0`; "Weights are Convai Innovations' and remain under Apache 2.0. Export code: MIT"), with one commit, `68f27dfe5a27a54fb2b1fefc432f43f972e90868` of 2026-09-19, and the English checkpoint only. Its five files total 1,692,649,436 bytes; D11 lists each size and SHA-256. Its `laya_config.json` temperatures equal those in Convai's current `rl_agent_config.json`. Hugging Face answers a large-file request with HTTP 302 to a CDN host (`us.aws.cdn.hf.co` was observed) and names the revision in `x-repo-commit`. | Hugging Face model and tree APIs at that revision (SHA-256 of the two large files from their LFS records; the three small files fetched and hashed, and their git blob ids match the tree); `curl -I` of `laya.onnx.data` |
+| `onnxruntime-node` 1.30.0 (MIT) is a 113,507,888-byte tarball, about 301 MB unpacked, with CPU binaries for macOS, Linux and Windows on x64 and arm64. Its `postinstall` downloads the CUDA 12 provider from NuGet on linux/x64 unless `--onnxruntime-node-install=skip` or `ONNXRUNTIME_NODE_INSTALL=skip` is given. | `npm view onnxruntime-node`; the tarball's `Content-Range`; [`js/node/script/install.js` and `install-metadata.js` at `v1.30.0`](https://github.com/microsoft/onnxruntime/tree/v1.30.0/js/node/script) |
+| `@cueplusplus/ui` 0.20.1, `@cueplusplus/tokens` 0.20.1 and `@cueplusplus/theme-cue` 1.1.1, and `@cueplusplus/theme-base` 1.3.0, on which `ui` depends, are **public on npm under MIT**: an anonymous `npm view` (no token, empty user configuration) returned each. Their repository is `cueplusplus/cue-ui`; they need Node ≥ 22, and `ui` lists React 19 and Tailwind 4 among its peers. This corrects the round-1 research, which found the scope private. | `npm view <package> --userconfig /dev/null --registry https://registry.npmjs.org/` |
+| Tauri can sign a macOS app ad hoc with `signingIdentity: "-"`, which needs no Apple identity and which Tauri calls useful on Apple silicon, "where code-signing is required for all apps from the Internet"; ad-hoc signing does not stop macOS from requiring the person to allow the app. Apple's steps for an app from an unidentified developer: System Settings, Privacy & Security, then under Security **Open Anyway**, offered for about an hour after the attempt to open it, then the login password. | [Tauri macOS signing](https://v2.tauri.app/distribute/sign/macos/), [Apple: open a Mac app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac) |
+| For an unsigned Windows file, Microsoft Defender SmartScreen shows "Windows protected your PC" and the person must choose **Run anyway**, shown after **More info**, before it runs. Enterprise policy can remove that choice, an unsigned file starts with no reputation on every new version, and on Windows 11 Smart App Control blocks unsigned files that have no positive reputation. | [Microsoft: SmartScreen reputation for Windows app developers](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation); [BleachBit's SmartScreen page](https://www.bleachbit.org/microsoft-defender-smartscreen) for the "More info" step |
 
 ## 3. Decisions
 
@@ -103,11 +135,13 @@ A rule that automatically forwards future messages is not the existing send gate
 content; event emission approves a bounded class of future, unseen content. This design names that new authority a
 **standing disclosure authorisation**.
 
-**Approval rule.** Enabling or loosening a rule, activating the judge budget, or enabling all collection always needs
-approval outside the chat, regardless of `changePolicy`: either `agent-events approve <id>` at the human terminal,
-or the desktop app's typed-challenge flow (D13). Creating or editing a target, subscriber or judge creates an inert
-immutable version; it has no standalone activation or approval path. It gains disclosure authority only when an
-approved rule activation names that exact version. Phase B1 adds a fourth core approval kind, `disclosure`; the
+**Approval rule.** Enabling or loosening a rule, activating the judge budget, enabling a judge kind, or enabling all
+collection always needs approval outside the chat, regardless of `changePolicy`: either `agent-events approve <id>` at
+the human terminal, or the desktop app's typed-challenge flow (D13). Creating or editing a target, subscriber or judge
+creates an inert immutable version; it has no standalone activation or approval path. It gains disclosure authority
+only when an approved rule activation names that exact version. Every judge kind—hosted Jev, local Laya and a local
+endpoint—is off until the person enables that kind (D11); that enablement is its own approval, separate from every
+rule's, names no judge version and makes none usable by itself. Phase B1 adds a fourth core approval kind, `disclosure`; the
 present core union has only `send | change | download` (`packages/core/src/approvals.ts:43-54`). A disclosure record
 can be approved only through the trusted terminal or app control surface and can be claimed only from `approved`,
 never directly from `pending`. `chat` and MCP may prepare and explain one, but can never approve or claim it. This is
@@ -122,17 +156,17 @@ digest-version, challenge/state and timestamp fields, `kind: "disclosure"`, and 
 interface DisclosureBinding {
   digest: string;
   activationIntentId: string;
-  activationKind: 'rule' | 'judge-budget' | 'enable-all';
+  activationKind: 'rule' | 'judge-budget' | 'judge-kind' | 'enable-all';
   versions: readonly {
-    kind: 'rule' | 'target' | 'subscriber' | 'judge' | 'judge-budget';
+    kind: 'rule' | 'target' | 'subscriber' | 'judge' | 'judge-budget' | 'judge-kind';
     id: string;
     version: number;
   }[];
 }
 ```
 
-`versions` is sorted by `(kind, id, version)` and is derived from one of the three canonical activation documents
-below; it cannot be supplied independently. It is non-empty for a rule or budget activation. An `enable-all`
+`versions` is sorted by `(kind, id, version)` and is derived from one of the four canonical activation documents
+below; it cannot be supplied independently. It is non-empty for a rule, budget or judge-kind activation. An `enable-all`
 document may have an empty rule-version list only when there are no active rule pointers, in which case enabling has
 no source set and performs no provider baseline. The record has no `inboxId`, `inboxSub`, `draftId`,
 `draftMessageId`, send/change policy, risk flags, recipient expectations, send outcome, `change` or `download`
@@ -140,7 +174,7 @@ fields. Its top-level approved digest, when present, must equal `binding.digest`
 Its common timestamp member `usedAt` is absent before claim and required exactly in state `used`; it is written once
 by core's claim transition and never changed by a later read or recovery.
 Strict parsing also checks that `activationKind`, document kind and derived version-list shape agree, so no rule
-approval can be claimed as a budget or enable-all activation.
+approval can be claimed as a budget, judge-kind or enable-all activation.
 
 The store exposes three kind-specific methods. `createDisclosure(binding)` validates that canonical shape and creates
 only `pending`; `approveDisclosure(id, liveBinding, challenge, via)` rechecks the complete binding and moves only
@@ -161,7 +195,7 @@ current dispatcher and mismatch paths enumerate only the older kinds
 cover create, terminal/app challenge approval, claim, expiry, revoke, drift, crash recovery and concurrent single use,
 plus every ordered cross-kind claim pair among `send`, `change`, `download` and `disclosure`.
 
-**Three canonical activation documents.** The daemon creates immutable pending versions and one deterministic
+**Four canonical activation documents.** The daemon creates immutable pending versions and one deterministic
 preview. A disclosure digest is lowercase SHA-256 over core's recursively key-sorted canonical JSON
 (`packages/core/src/digest.ts:99-100,117-127`) of exactly one version-1 document:
 
@@ -169,6 +203,7 @@ preview. A disclosure digest is lowercase SHA-256 over core's recursively key-so
 type ActivationDocumentV1 =
   | { documentVersion: 1; kind: 'rule'; rule: CanonicalFullRuleDocument }
   | { documentVersion: 1; kind: 'judge-budget'; budget: CanonicalJudgeBudgetDocument }
+  | { documentVersion: 1; kind: 'judge-kind'; enablement: CanonicalJudgeKindDocument }
   | {
       documentVersion: 1;
       kind: 'enable-all';
@@ -177,7 +212,7 @@ type ActivationDocumentV1 =
     };
 ```
 
-The three kinds have these exact version lists and effects:
+The four kinds have these exact version lists and effects:
 
 1. A **rule activation** derives `versions` from the rule version plus every target, subscriber and judge version
    embedded in `rule`; it atomically replaces only that rule id's active pointer. The referenced object versions are
@@ -195,6 +230,13 @@ The three kinds have these exact version lists and effects:
    the rule versions' authorisation lineage. From the instant its approval is `used` until the intent is completed, failed or cancelled, D12's mutation
    fence refuses every rule-pointer mutation except `disable-all`. The switch is mutable state with a generation
    fence, not a versioned object and never a `versions` kind.
+4. A **judge-kind enablement** has exactly one `judge-kind` entry for that kind's immutable enablement version and
+   atomically replaces only that kind's enablement pointer. Its canonical document (D11) names the kind and, for
+   `typesafe`, the fixed endpoint, or, for `laya`, the complete model manifest entry: source host, repository and
+   40-hex revision, every file's path, byte size and SHA-256, the pinned third-party runtime versions and the prompt
+   templates. It contains no rule, judge, budget, account or event field and authorises no disclosure by itself: a
+   judge of that kind still needs an approved rule activation naming its exact version and the active budget.
+   Enabling `laya` also starts D11's runtime installation and model download.
 
 The canonical full rule document embeds the referenced immutable documents rather than hashing only their ids, and
 contains all of:
@@ -215,20 +257,25 @@ contains all of:
   installation identity; it contains only reset metadata, no account or sender content, and cannot be disabled
   independently while an active rule references that target version. Secret
   bytes and secret generations are deliberately absent;
-- each judge id/version, provider, model, full endpoint, prompt-template version, exact input pointers, output
+- each judge id/version, kind, provider, model, full endpoint (for `laya`, the model manifest id in its place),
+  prompt-template version, exact input pointers, output
   interpretation, maximum input/output tokens and the rule's own call/token/concurrency limits. Daemon-wide and
   per-provider ceilings live only in D5's separately approved singleton budget version, never in a rule. The rule
   fields are explicitly calls per rolling hour, input tokens per rolling 30 days and concurrency; and
 - the delivery rate cap (default 60 deliveries per rolling hour) and **every** retention value: ingest content,
-  hold, delivery, dry-run, SSE replay, dead-letter payload and decision metadata. The defaults are respectively 24
-  hours, 24 hours, 24 hours, 24 hours, 24 hours, seven days and 30 days; dry-run is capped at 24 hours and SSE at
-  seven days. Raising any cap or retention is a loosening. Saving refuses `hold retention > ingest retention`, so a
-  hold can never extend the life of that rule version's own encrypted projection.
+  hold, delivery, dry-run, SSE replay, dead-letter payload and decision metadata. The defaults, set by the owner on
+  2026-10-06 (§8), are respectively seven days, seven days, seven days, 24 hours, seven days, seven days and 90 days:
+  every content-bearing value is seven days except dry-run, which keeps its 24-hour default and cap, and decision
+  metadata, which holds no content, is 90 days. SSE replay is capped at seven days, so its default is also its cap.
+  Raising any cap or retention is a loosening. Saving refuses `hold retention > ingest retention`, so a hold can never
+  extend the life of that rule version's own encrypted projection; the equal seven-day defaults satisfy it.
 
-Golden digest vectors cover all three document kinds. Rule vectors change one field at a time, including an account
+Golden digest vectors cover all four document kinds. Rule vectors change one field at a time, including an account
 id, a newly connected but unselected account, each source option, an ordinary URL path, a secret-URL fingerprint,
-mapping constant, missing policy, referenced object version and each per-rule judge limit. Budget vectors change
-each daemon/provider ceiling and the singleton version. Enable-all vectors change the switch generation, add,
+mapping constant, missing policy, referenced object version, each per-rule judge limit and each retention default.
+Budget vectors change each daemon/provider ceiling and the singleton version. Judge-kind vectors change the kind, the
+hosted endpoint, the Laya manifest revision, each file's path, size or SHA-256, each pinned runtime version and the
+prompt-template list. Enable-all vectors change the switch generation, add,
 remove or reorder a rule-version id, and prove canonical sorting makes only reorder a no-op. Cross-kind vectors prove
 the same nested JSON under another `kind` has another digest. Every active or superseded rule version is authorised
 in exactly one of two mechanically checked ways: an activation whose disclosure approval names that exact version, or a
@@ -260,8 +307,10 @@ claimed cross-store transaction:
 2. Terminal or app approval calls `approveDisclosure` with the re-planned live binding. The activation operation then
    calls `claimForDisclosure` on that exact approved record. Core's existing store uses a per-record transition and
    an `O_EXCL` marker for its single-use guarantee (`packages/core/src/approvals.ts:20-29,801-813`).
-3. A judge-budget activation proceeds directly to a final SQLite transaction that re-checks the intent, expected
-   pointer state and binding, applies only the budget effect, records the activation and marks the intent complete.
+3. A judge-budget or judge-kind activation proceeds directly to a final SQLite transaction that re-checks the intent,
+   expected pointer state and binding, applies only the budget or enablement-pointer effect, records the activation
+   and marks the intent complete. A `laya` enablement's installation and download then run under D11, outside that
+   transaction and outside the approval: they can fail or be retried but cannot change what was approved.
    **Every exact rule-version activation**, whether it is a first rule, a second rule for an already effective type,
    or a replacement of an active version, uses D12's staged-position protocol for every account it names. A
    replacement additionally uses D12's drain-before-swap branch over the union of the old and new versions' scopes.
@@ -331,7 +380,7 @@ the exact object-version grant rather than inventing a standalone object activat
 different: it records an immediate revocation of all of its versions and cancels their work, but activates no
 replacement. The **entire no-approval tightening whitelist** is syntactic:
 
-1. disable a rule, or revoke a target, subscriber or judge without replacing it;
+1. disable a rule or a judge kind, or revoke a target, subscriber or judge without replacing it;
 2. remove a target from a rule;
 3. remove an output field from a mapping;
 4. lower a rate cap;
@@ -355,7 +404,7 @@ cut-over id to the new version with `inheritedFromVersionId`, marks the displace
 lineage, not a newly manufactured approval. The transaction first proves the parent version is currently effective
 and authorised, and that `editKind` is exactly the one syntactic whitelist transformation being applied. A derived
 version may parent another derived version, but following `parentVersionId` must be acyclic and must end at the
-exact version named by `parentApprovalId`. A disable or object revocation creates no replacement effective version,
+exact version named by `parentApprovalId`. A disable, judge-kind disable or object revocation creates no replacement effective version,
 so it records only the revocation/cancellation effect and needs no derived row. No source treats a version as active,
 and no worker, recovery path, dry-run read or SSE replay treats an active or superseded bound version as authorised,
 unless this exact-or-derived lineage validates.
@@ -368,7 +417,8 @@ of those cancellations or purges. A crash cannot
 commit a new pointer without its derived row or vice versa. Each edit has one explicit post-commit invariant and test;
 there is no generic “disclosure-set subset” proof:
 
-1. disabled object — no new judge reservation, delivery claim, dry-run/SSE append or replay bound to it can cross;
+1. disabled object or judge kind — no new judge reservation, delivery claim, dry-run/SSE append or replay bound to it
+   (or, for a kind, to any judge of it) can cross;
 2. removed target — no delivery to that target can cross;
 3. removed output field — that pointer is absent from every newly created payload;
 4. lower rate cap — no new cap charge can exceed the lower rolling-window limit;
@@ -387,13 +437,14 @@ exact replacement makes the old version `superseded`, not revoked. Its already-c
 queued or retryable deliveries, retained dry-run rows and SSE replay entries remain authorised until their own
 approved retention deadlines. They keep their exact bound versions and are never remapped to the new active pointer.
 Only a revoking action cancels work: an immediate tightening replacement, rule disable or removal, bound-object
-revocation/removal, account removal, or `disable-all` through its switch-generation revocation. Supersession by
-itself is not a revoking action.
+revocation/removal, judge-kind disable (for work that needs a judge of that kind), account removal, or `disable-all`
+through its switch-generation revocation. Supersession by itself is not a revoking action.
 
 Revocation is immediate at its commit. Immediately before judge or delivery I/O, on retry, and on dry-run read or
 SSE replay, the boundary transaction requires the bound rule version to be **not `revoked`**, every referenced
-target/subscriber and judge version to be unrevoked, the bound rule's exact-or-derived authorisation lineage to
-validate, the row's switch generation to equal the live enabled generation, and D9's account to be live. It never
+target/subscriber and judge version to be unrevoked, each bound judge's kind to be enabled, the bound rule's
+exact-or-derived authorisation lineage to validate, the row's switch generation to equal the live enabled
+generation, D9's account to be live and, for a WhatsApp row, D9's live-list check to pass. It never
 requires the bound rule version to remain the active pointer: `superseded` work remains valid. After revocation
 commits, no worker can cross that boundary. I/O
 already in flight cannot be recalled and is recorded as such.
@@ -437,7 +488,7 @@ Credential exposure to model context is already in scope as a vulnerability (`SE
 >   content, or any hosted or local judge being invoked with it, without an active, digest-bound standing
 >   disclosure authorisation for exact approved versions, or versions derived from them by a whitelisted tightening,
 >   including the complete validated derivation lineage for the exact effective rule, target, subscriber and judge
->   versions; after that authorisation is revoked; outside its approved mapping,
+>   versions; after that authorisation is revoked; while the judge's kind is not enabled; outside its approved mapping,
 >   retention or delivery rate cap; or without successful taint recording before disclosure.
 
 and, under "What the safety model does not claim":
@@ -445,8 +496,8 @@ and, under "What the safety model does not claim":
 > - **A standing disclosure authorisation is not approval of each event.** Once a person enables one at the terminal
 >   or in the app, future unseen content that matches its approved rule may leave automatically through its approved
 >   target or be evaluated by its approved judge. `agent-events doctor` and the app list every active authorisation.
->   Disabling or removing any bound rule, target, subscriber or judge revokes it immediately; content already in a
->   network operation cannot be recalled.
+>   Disabling or removing any bound rule, target, subscriber or judge, or disabling a judge kind, revokes it
+>   immediately; content already in a network operation cannot be recalled.
 
 ### D3. The event catalogue: typed, versioned, and explicit about trust
 
@@ -576,8 +627,9 @@ Three independent mechanisms must not be conflated:
    `<untrusted-content>` envelope (`packages/core/src/untrusted.ts:99-120`). `plain` delivers the sanitised value as
    typed by the source, with no mapping transform, and is a loosening whose approval preview warns: "This is a
    sanitised source value, not the provider's raw bytes. A consumer that feeds it to a model must envelope it first."
-   Local SSE subscribers default to `enveloped`. Whether this is the accepted meaning of “values as they are” remains
-   the explicit owner question in §8.
+   Local SSE subscribers default to `enveloped`. The owner confirmed on 2026-10-06 (§8) that “values as they are”
+   means exactly this: clean typed values—typed, sanitised source values with no transforms—never the provider's raw
+   bytes (D6).
 2. **Address and handle taint.** This is always computed from the exact final target payload or judge input and
    flushed before disclosure, regardless of prose representation (D7).
 3. **Other untrusted text.** Provider and target error messages are sanitised, bounded and rendered as untrusted in
@@ -924,10 +976,15 @@ type CanonicalCondition =
   `caseSensitive`, missing/negation, every legal format, Unicode 15.1 folding and UTS #46, and the same vectors run
   against Node and a real browser build.
 
+Deterministic conditions work from the start: they need no judge, no judge-kind enablement and no budget.
+
 **Agentic** — a question put to a judge after a real deterministic prefilter:
 
 - `{ judgeId, judgeVersion, question, inputs: JsonPointer[], threshold, onUncertain }`. At least one deterministic
   leaf must reference a catalogue `content` field; account/type checks alone do not qualify.
+- The judge's kind—`typesafe`, `laya` or `local-endpoint`—must be enabled (D11). Every kind is off until the person
+  enables it; preparing, claiming or finalising a rule activation whose judge's kind is not enabled is refused with
+  `JUDGE_KIND_DISABLED`, and no reservation can be made for a judge of a disabled kind.
 - The judge sees only `inputs`, sanitised and enveloped in a fixed versioned prompt. Input to every implemented judge
   is taint-flushed before the call (D7). It has no tools, secrets or authority.
 - An adapter must return one provider-native numeric probability `p`. A value of the wrong type, a non-finite number
@@ -937,7 +994,9 @@ type CanonicalCondition =
   clamping or otherwise normalising either value. The uncertain band begins at `threshold - 0.1` when the threshold
   is at least `0.1`, otherwise at `0`, and ends immediately below `threshold`. `onUncertain` is `no-match` by default
   or `hold`; only the terminal or app can resolve a hold.
-- TypeSafe/Ollama Noul values are labelled **probability**. A generic JSON-output model's number is labelled
+- TypeSafe/Ollama Noul values are labelled **probability**. Laya's output is interpreted exactly like Jev's and is
+  also labelled **probability**, because a Laya manifest entry and prompt template ship only after D11's quality gate
+  has measured their calibration on labelled Gmail and Slack data. A generic JSON-output model's number is labelled
   **uncalibrated score**, never Noul probability. `reasonCode`, if any, follows D3.
 - A timeout, malformed response or exhausted budget is no-match and degrades the judge. The stored decision records
   provider, model and judge versions, prompt-template version, threshold, value/label and reason code. Retries never
@@ -962,7 +1021,11 @@ type CanonicalCondition =
   `in-flight` row with no settlement by charging its one call and token estimate because the provider may have billed
   it; in either case it frees the concurrency slots in the same recovery transaction. Recovery is idempotent and
   cannot charge a settled row twice. Timeout and transport-unknown outcomes settle with the estimate, never refund.
-  No active singleton means no judge call.
+  No active singleton means no judge call, and neither does a disabled judge kind: disabling a kind is D2's immediate
+  tightening, whose one transaction cancels every nonterminal decision waiting on a judge of that kind, releases its
+  `reserved` rows, pessimistically settles its `in-flight` rows as recovery does, and cancels and purges the
+  deliveries, dry-run rows and SSE entries bound to such a judge (D11); a later result for such a decision is
+  discarded.
 - `judge test` has no synthetic rule limits. Its transaction instead enforces a durable rolling ceiling of ten tests
   per hour for the exact `(judgeId, judgeVersion)` and reserves the call, maximum tokens and concurrency against the
   active singleton's **global** rolling-hour, rolling-30-day and concurrency ceilings. It charges neither a rule nor
@@ -984,7 +1047,12 @@ The output of a rule is a JSON template whose leaves are constants or path refer
 ```
 
 `$path` is a concrete RFC 6901 pointer validated against the event schema. It copies the value and type exactly,
-including whole objects and arrays. `missing` is `reject` (default), `omit` or `null`, but `omit` is legal only when
+including whole objects and arrays. This is what the owner's “values as they are” means (§1; confirmed in §8): a
+`$path` leaf delivers the **clean typed value** at that path—the catalogue's typed, sanitised source value, exactly
+as Appendix A types it, with no transform—and **never the provider's raw bytes**: no raw HTML, MIME part, API
+response text, undecoded encoding or provider-specific wire form reaches a mapping. The only difference a target can
+make to a copied value is D3's prose representation: `enveloped` wraps each untrusted string, while `plain` leaves the
+sanitised string as it is. `missing` is `reject` (default), `omit` or `null`, but `omit` is legal only when
 the path node is the value of an object property: it removes that property. A path node at the template root or at an
 array element must use `reject` or `null`; save refuses `omit` there, so evaluation never invents an absent root or a
 sparse/shifted array. There are no transforms, expressions or array projections. Limits are 256 KB per mapped event,
@@ -1079,9 +1147,9 @@ every CLI, MCP, app, preview, audit and diagnostic output to prove the full secr
 
 | Target | Version 1 contract |
 |---|---|
-| **Dry-run** | No network I/O. At the delivery boundary, append the exact would-be CloudEvent bytes to the encrypted `dryrun_log` table using D8's packed-record format. The target version binds a retention no longer than 24 hours. `targetKey` is `dryrun:<targetId>:<targetVersion>`. The append charges the rule's ordinary delivery cap and completes the delivery atomically. Only a person at the terminal or in the app may read it, through D3's untrusted text renderer; no MCP result, structured content, log or audit row contains its payload. |
+| **Dry-run** | No network I/O. At the delivery boundary, append the exact would-be CloudEvent bytes to the encrypted `dryrun_log` table using D8's packed-record format. The target version binds a retention no longer than 24 hours. `targetKey` is `dryrun:<targetId>:<targetVersion>`. The append charges the rule's ordinary delivery cap and completes the delivery atomically. Only a person at the terminal or in the app may read it, through D3's untrusted text renderer; no MCP result, structured content, log or audit row contains its payload. Every `dryrun show` of a WhatsApp row first passes D9's live-list check under the visibility gate. |
 | **Webhook** | `POST` of the exact CloudEvent bytes in CloudEvents structured mode with exactly `Content-Type: application/cloudevents+json; charset=utf-8`, plus the Standard Webhooks headers and signatures below. The scheme is `https` except that `http` is allowed only when the URL host itself is the literal IP `127.0.0.1` or `::1` and that same address is covered by `approvedAddressSet`; a hostname that resolves to loopback is not a literal and is refused. Success is 2xx. Retry with capped exponential backoff and jitter until success, the approved delivery-retention deadline or 20 attempts. Exhausting attempts before the deadline is `dead-lettered`; reaching the deadline first is `retention-expired`. Promise: **bounded at-least-once attempts**, not unconditional receipt. |
-| **Local SSE stream** | `GET /v1/streams/<subscriber>` on 127.0.0.1/::1. Each subscriber has an encrypted retained stream log, default 24 hours and maximum 7 days, bound into its standing authorisation. `Last-Event-ID` replays entries still in that window only while the recorded rule version is not revoked, its target/subscriber/judge versions are unrevoked, the entry's switch generation is the live enabled generation and D9's account is live. A superseded rule version remains replay-authorised through the entry's own retention deadline. There is no acknowledgement, so the promise is only **available for replay within the approved window**, never receipt or processing. |
+| **Local SSE stream** | `GET /v1/streams/<subscriber>` on 127.0.0.1/::1. Each subscriber has an encrypted retained stream log, default and maximum seven days, bound into its standing authorisation. `Last-Event-ID` replays entries still in that window only while the recorded rule version is not revoked, its target/subscriber/judge versions are unrevoked, the entry's switch generation is the live enabled generation and D9's account is live; a WhatsApp entry is also sent, live or replayed, only after D9's live-list check under the visibility gate passes for its raw tuple, frame by frame. A superseded rule version remains replay-authorised through the entry's own retention deadline. There is no acknowledgement, so the promise is only **available for replay within the approved window**, never receipt or processing. |
 
 Dry-run, webhook and SSE are the only delivery adapters specified here; phase B1 implements dry-run and phase B2
 adds the network adapters. Broker and hosted-queue adapters require the separate
@@ -1097,7 +1165,7 @@ its approved retention deadline. A cap-exhausted delivery waits without an attem
 its retention deadline makes it terminal.
 
 **Retention is terminal.** Rule validation refuses a hold window longer than that rule's ingest window. A held
-decision receives `holdExpiresAt` from the approved hold window, default 24 hours; if no person resolves it by then,
+decision receives `holdExpiresAt` from the approved hold window, default seven days; if no person resolves it by then,
 one transaction records terminal outcome `hold-expired` and purges that rule version's encrypted event projection,
 creating no delivery and retaining nothing on behalf of another rule. Every delivery has an approved
 absolute retention deadline independent of its retry
@@ -1151,7 +1219,7 @@ expire behind the durable barrier, resume from the terminal/app, and prove no la
 new reset delivery. A shared-target test gives two rules different ordinary caps and retentions, removes them one at
 a time, and proves the fixed reset charge is cap-exempt and is cancelled only after the final active reference ends.
 
-Decision metadata has `metadataExpiresAt`, default 30 days or the approved shorter value, and `metadataState`.
+Decision metadata has `metadataExpiresAt`, default 90 days or the approved shorter value, and `metadataState`.
 At expiry one transaction appends a non-content purge tombstone, clears judge values/reasons and other expiring
 metadata, and moves `metadataState` to `purged`; the minimal ids and uniqueness tuple remain so the event cannot be
 evaluated again. No deadline ordering—hold, ingest, delivery, dead-letter or decision metadata—extends any other.
@@ -1194,7 +1262,7 @@ written. A deterministic two-new-writer test pauses writer A after its sidecar c
 starts writer B, proves B cannot acquire the sidecar or prune A's row, then resumes both and observes the merged
 `event` origin.
 
-**Network resolution.** Every webhook or local-judge version carries an explicit, non-empty
+**Network resolution.** Every webhook or `local-endpoint` judge version carries an explicit, non-empty
 `approvedAddressSet`: sorted literal IPs and CIDRs bound into its digest. On every connection—not only at approval—the
 daemon resolves the original host itself, normalises every answer and refuses the whole attempt unless every resolved
 address it could select falls inside that exact set. A literal-IP host still has a singleton set. Classification then
@@ -1258,8 +1326,8 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
 - `meta(key PRIMARY KEY, value)` holds the schema version, reset epoch and D3 `installationId`;
 - `event_settings(singleton, enabled, switchGeneration, changedAt, activationId?)` — the authoritative global
   switch and generation fence, not an immutable versioned object;
-- immutable `rule_versions`, `target_versions`, `subscriber_versions`, `judge_versions` and
-  `judge_budget_versions`, each holding its full canonical document and digest. `rule_versions` additionally has
+- immutable `rule_versions`, `target_versions`, `subscriber_versions`, `judge_versions`, `judge_budget_versions` and
+  `judge_kind_versions`, each holding its full canonical document and digest. `rule_versions` additionally has
   nullable lifecycle columns `state`, `approval_id`, `authorization_activation_id`, `activated_at`, `superseded_at` and
   `revoked_at`: `state`, when present, is constrained to the exact enum `active | superseded | revoked`; an inert
   never-activated version has all six null and therefore no lifecycle state. Activation fixes the approval and
@@ -1268,8 +1336,12 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   `active_versions(kind, objectId, version, currentCutoverId?, activatedAt)` is `active`; an exact replacement's swap changes its predecessor to
   `superseded`, while a tightening, disable or remove changes the displaced version to `revoked`. `superseded_at` is
   set only on the transition to `superseded`; `revoked_at` is set only on the transition to `revoked`, including a
-  later explicit revocation of a superseded version. `active_versions` permits only rule pointers and the singleton
-  judge-budget pointer. A rule version's `authorizationActivationId` is immutable lineage: the exact activation
+  later explicit revocation of a superseded version. `active_versions` permits only rule pointers, the singleton
+  judge-budget pointer and at most one enablement pointer per judge kind (`typesafe`, `laya`, `local-endpoint`); a
+  kind with no pointer is disabled, which is every kind in a new database. Content-free
+  `laya_models(manifestId PRIMARY KEY, state, bytesVerified, verifiedAt?, failureCode?, updatedAt)` records D11's
+  closed `installing | downloading | ready | failed | removed` model state; it holds no path outside the data
+  directory and no model bytes. A rule version's `authorizationActivationId` is immutable lineage: the exact activation
   intent id, or its canonical version id for a derived tightening. Every active rule pointer separately has one
   mutable `currentCutoverId` selecting the `rule_activation_points` rows workers must use now. First activation and
   exact replacement initialise it, a derived tightening replaces it with the copied version-id set, and every
@@ -1576,9 +1648,9 @@ current generation. A mismatch records terminal `cancelled`, or preserves `in-fl
 already crossed `disclosing`; it releases reservations, purges payloads and can never create retryable work. The
 disable and re-enable protocol that advances this fence is D12.
 
-Decision metadata defaults to 30 days; ingest content, holds, delivery, dry-run and SSE replay default to 24 hours;
-dead-letter payload retention defaults to seven days. The person may shorten any retention through D2's whitelist;
-validation still enforces `hold <= ingest`. Raising one needs a new standing authorisation. Expiry workers use
+Decision metadata defaults to 90 days; ingest content, holds, delivery, SSE replay and dead-letter payload default to
+seven days; dry-run defaults to, and is capped at, 24 hours (D2). The person may shorten any retention through D2's
+whitelist; validation still enforces `hold <= ingest`. Raising one needs a new standing authorisation. Expiry workers use
 database time/deadlines, D7's decision-metadata purge transition and terminal payload transitions, not best-effort
 deletion jobs.
 
@@ -1696,9 +1768,10 @@ daemon owns its separate store, selector, lock and migration.
 primitive is an atomic rename (`packages/core/src/config.ts:949-951`) and makes every event tightening, cancellation
 and dry-run/SSE purge one SQLite transaction.
 
-There is no mutable "current target" behind a delivery. SQLite has active pointers only for rules and the singleton
-budget; queued rows hold an exact rule version plus exact target/subscriber/judge versions and consult lifecycle state,
-object revocations and the switch generation rather than following the active pointer. **A new object version does
+There is no mutable "current target" behind a delivery. SQLite has active pointers only for rules, the singleton
+budget and each judge kind's enablement; queued rows hold an exact rule version plus exact target/subscriber/judge
+versions and consult lifecycle state, object revocations, judge-kind enablement and the switch generation rather than
+following the active pointer. **A new object version does
 nothing until each intended rule is re-approved with it; superseding a rule retains its already-bound work, while a
 no-approval revocation cancels affected work and purges its encrypted dry-run/SSE content in one store.** No older-release config compatibility fixture is needed for
 event configuration, but the explicit prior-core secret-migration fixture above is required because core and events
@@ -1717,7 +1790,7 @@ exceptions identified below:
 | Rules | `rules list`, `rule show`, `rule create|update|enable|disable|remove`, `rule test` |
 | Targets | `targets list`, `target add|update|remove`, `target test`, `target resume` |
 | Subscribers | `subscribers list`, `subscriber add|update|remove` |
-| Judges | `judges list`, `judge add|update|remove`, `judge test`, `budget show|update` |
+| Judges | `judges list`, `judge add|update|remove`, `judge test`, `budget show|update`, `judge kinds list`, `judge kind enable|disable <kind>`, `judge model status|remove` |
 | Deliveries | `deliveries list`, `delivery retry|drop`, `held list|decide` |
 | Dry-run log | `dryrun list|show` |
 | Secrets | `target secret create|rotate <targetId>`, `target url set <targetId>`, `subscriber token create|rotate`, `judge key set|rotate <judgeId>`, `secrets migrate --to keychain|file` |
@@ -1739,7 +1812,8 @@ content may be selected only by a person outside model context”; it is absent 
 marker. It checks D9's live account before reading, renders sender content with the safe terminal/app renderer, takes
 no account argument and does no provider, judge or target I/O.
 
-`judge test` may call only a judge version referenced by an active rule. The terminal or app may test a pending judge
+`judge test` may call only a judge version referenced by an active rule, and only while that judge's kind is enabled
+(for `laya`, with its model `ready`). The terminal or app may test a pending judge
 from the approval screen only as part of a pending **rule activation that references that exact judge version**; MCP
 and ordinary CLI calls cannot. The same rule applies to **every** real implemented judge call. It sends only D3's
 fixed `io.agentcomms.test.v1` synthetic value, accepts no caller content or field override, runs the ordinary taint path
@@ -1769,37 +1843,210 @@ precedent for visible exceptions and same-operation parity is
 or app can approve and activate it. Its digest contains all daemon-wide and per-provider ceilings. Rule operations
 reject any attempted provider/global budget field; a rule carries only D5's per-rule limits.
 
-The first call that activates a rule or budget, or enables all, returns `standingApprovalRequired`, its activation
-kind, a `disclosure` approval id, digest and complete preview. A repeated MCP call cannot claim it. The terminal/app
-approval operation re-plans under the daemon activation lock, refuses kind/version-list/digest drift and runs D2's
-intent → core claim → SQLite activation protocol.
+The first call that activates a rule or budget, enables a judge kind, or enables all, returns
+`standingApprovalRequired`, its activation kind, a `disclosure` approval id, digest and complete preview. A repeated
+MCP call cannot claim it. The terminal/app approval operation re-plans under the daemon activation lock, refuses
+kind/version-list/digest drift and runs D2's intent → core claim → SQLite activation protocol.
+
+`judge kind enable <kind>` prepares D11's enablement from either surface; only the terminal or app approves it, and
+the app is where a person normally does. `judge kind disable <kind>` is D2's immediate tightening from either surface,
+like `disable-all`. `judge model status` reports the Laya runtime and model state and download progress;
+`judge model remove` deletes the verified model files and the installed runtime only while `laya` is disabled, from
+either surface, since removing local files discloses nothing.
 `doctor` reports daemon/protocol health, global switch, every active exact approval or complete derived lineage with
 its immutable authorisation-activation id, the active pointer's `currentCutoverId` and exactly the per-account/scope
 points selected by that current id, every superseded version that still owns retained work, pending activation and
 pending-completion intents (including any claimed rule replacement draining to P or `enable-all` activation awaiting
 source positions), terminal failed activations and their audit code, Gmail metadata-read and Gmail/Resend lazy-
 materialisation retry age plus `vanished`/`unresolvable` counts and last resolutions, and source lag,
-leases, held decisions, dead letters, retention deadlines and missing secrets.
+leases, held decisions, dead letters, retention deadlines and missing secrets. It also reports each judge kind's
+enablement version or `disabled`, the Laya manifest id, runtime and model state, and, for each WhatsApp account,
+whether D9's live lists are applied and when.
 
 The `agentcomms-events` skill teaches an agent to propose and test a disabled rule, explain both untrusted
-representations, and hand the approval id to the person. It never instructs the agent to type or request a secret.
+representations, say that every judge kind is off until the person enables it, and hand the approval id to the
+person. It never instructs the agent to type or request a secret.
 
-### D11. Judges: hosted Jev and local endpoints
+### D11. Judges: hosted Jev, local Laya and local endpoints
 
 | Kind | Contract | Disclosure |
 |---|---|---|
 | `typesafe` | Jev through `POST https://api.typesafe.ai/v1/systemone`, using provider-native Noul output. It is **treated as hosted-only under currently published artefacts and terms**; this is not a claim that local Jev is impossible. | Exact approved input fields leave for the approved host. |
+| `laya` | Laya (§2), run on this machine's CPU by a supervised child process of the daemon, from a pinned, checksum-verified ONNX bundle that is downloaded only after the person enables the kind. Its Noul P(true) is interpreted exactly like Jev's (D5). After the download it uses no network. | Nothing leaves the machine: the exact approved input fields reach only the local worker. |
 | `local-endpoint` | An approved `http` Ollama/System One endpoint or generic JSON-output model whose URL host is the literal `127.0.0.1` or `::1`; hostnames, HTTPS and non-loopback addresses are refused. Generic numbers are uncalibrated scores. The endpoint gets D7's per-connection resolution, address-set binding and redirect refusal; pending endpoints cannot be reached from MCP tests. | Only the explicitly approved literal loopback address; D7 taint still flushes before every call. |
 
-Every judge is immutable and versioned. No hosted or local judge may first acquire work until an active rule
-activation references that exact judge version, except for one terminal/app call made inside that pending rule
-activation's approval screen as D10 defines. Already-created work bound to a superseded, non-revoked rule version may
-still make its judge call under D8's version-and-generation fence. A hosted judge additionally needs its key
-completed by a person. "Never use judges"
-and revoking a judge are immediate whitelist tightenings: the transaction records the revocation, cancels and purges
-queued work, and purges dry-run/SSE rows whose decisions used it. Prompt injection can change only the model's
-bounded score/reason code; it cannot change rules, mappings, targets or authority. A bundled judge is deliberately
-deferred to D15.
+**Every judge kind is off until the person enables it.** A new database has no enablement pointer for any kind, and
+nothing—install, update, import, a rule activation or a budget activation—creates one. Enabling a kind is D2's fourth
+activation document: a terminal/app-only `disclosure` approval, separate from every rule's. The app's Judges screen
+is where a person normally does it (D13). The preview says what enabling does and what rules may then do: for
+`typesafe`, that a rule naming a TypeSafe judge may send its exact approved fields to `api.typesafe.ai`, each still
+under that rule's own standing authorisation, which stays on top; for `local-endpoint`, that a rule may call a
+person-run loopback server; for `laya`, the installation and download below, with their sources, sizes, licences and
+disk and memory use. Disabling a kind is D2's immediate tightening (D5). One transaction removes the pointer and
+treats all work bound to a judge of that kind as revoking each such judge would—waiting decisions, queued and
+retryable deliveries, dry-run rows and SSE entries are cancelled and purged—and the Laya worker is stopped. Unlike a
+revocation, it leaves rules, judge versions and their approvals intact but unable to call. Re-enabling needs a new
+enablement approval, whose preview lists the active rules that will call that kind again. No rule activation naming a judge of a disabled kind can be prepared, claimed or finalised, so that list
+can only shrink while the kind is off.
+
+`CanonicalJudgeKindDocument` is `{ id: "judge-kind:<kind>", version, kind }` plus, for `typesafe`,
+`endpoint: "https://api.typesafe.ai/v1/systemone"`, and, for `laya`, `manifest`: exactly the reviewed manifest entry
+below, with `files` sorted by raw UTF-8 path bytes. A `local-endpoint` enablement carries nothing more, because each of
+its judge versions binds its own URL and address set (D7).
+
+Every judge is immutable and versioned. No hosted or local judge may first acquire work until its kind is enabled and
+an active rule activation references that exact judge version, except for one terminal/app call made inside that
+pending rule activation's approval screen as D10 defines. Already-created work bound to a superseded, non-revoked rule
+version may still make its judge call under D8's version-and-generation fence while its kind stays enabled. A hosted
+judge additionally needs its key completed by a person. Disabling a judge kind
+and revoking a judge are immediate whitelist tightenings: the transaction records the disable or revocation, cancels
+and purges queued work, and purges dry-run/SSE rows whose decisions used that judge or a judge of that kind. Prompt
+injection can change only the
+model's bounded score/reason code; it cannot change rules, mappings, targets or authority. A person-run `laya-serve`
+on a literal loopback address is already usable as a `local-endpoint` System One judge, but `laya-serve` binds
+`0.0.0.0` without authentication unless the person sets a key (§2), which this design cannot enforce; the in-build
+`laya` kind below opens no listener at all.
+
+**Laya, in this build, optionally.** The owner asked whether Laya could be packed into this build, optionally (§1,
+§8). It can: the code that runs it is published with this repository's packages, the model is downloaded only when
+the person enables the `laya` kind, and nothing about it is in any installer.
+
+*The runtime.* The worker runs `@receptron/laya`, pinned exactly, and calls only
+`Laya.load({ modelDir, executionProviders: ["cpu"] })` over the daemon's own verified directory; the package's own
+downloader is never called. The reasons, all from §2: it is the only Node runtime for Laya published on npm, since the
+official `laya-ts` is not; it runs a published single-graph ONNX bundle, whereas `laya-ts` needs an `encoder.onnx`
+and `head.onnx` pair that nobody publishes and only a Python and PyTorch export can make; it already speaks Jev's
+`system_one` request and response shape, so Laya's answer is read where Jev's is; and it is a small, reviewable MIT
+TypeScript layer over the `onnxruntime-node` that every option needs. Calling `onnxruntime-node` directly was
+rejected because it would mean reimplementing Laya's tokenisation, option-marker sequence and per-cardinality
+temperature decoding, which must match the Python reference for the probabilities to mean anything. Against the
+choice: version 0.1.2 is young and a third party's. The exact pin, a review of its source at that version, the
+gate's parity check against the Python reference and the narrow use—one `noul` or two-option `choice` question per
+call, where issues #10 and #11 do not apply—bound that. Moving to another runtime later, such as an npm release of
+`laya-ts`, is a new manifest entry and therefore a new enablement approval.
+
+*Where it runs: an isolated child process, not the daemon.* The daemon starts `process.execPath` on the runtime's
+worker entry with stdin and stdout pipes carrying length-prefixed JSON frames like D12's, an environment reduced to
+what Node needs (no `AGENT_COMMS_*`, token, proxy or `LAYA_*` variable and no `NODE_OPTIONS`), and no other inherited
+descriptor, database handle, secret store, provider session or control-protocol token. The reasons:
+`onnxruntime-node` is a native addon, and a crash or out-of-memory in it must not take down the process that owns the
+event database and outboxes; a native inference call cannot be cancelled from JavaScript, so D5's timeout is enforced
+by killing the worker; the roughly 2 GB the model occupies is returned when the worker exits; and the worker needs
+none of the daemon's authority. It is a fault and resource boundary, not a security boundary against a same-user
+process (§7, risk 2). The worker starts on the first call, exits after ten idle minutes, when the kind is disabled or
+when the daemon stops, and is started again after a crash. One worker answers one request at a time, so budget
+validation refuses a `laya` per-provider concurrency ceiling above 1.
+
+Before loading, the worker re-hashes every bundle file against the manifest and refuses to start on any difference.
+It replaces `globalThis.fetch` with a function that throws before it imports the runtime, and imports no network
+module. Each request carries only the taint-flushed, enveloped judge input (D5, D7), the rule's question and the judge
+version's prompt template. The worker counts the input's tokens with the bundle's own tokenizer and refuses an input
+that the 512-token context would truncate, rather than let the runtime truncate it silently; D5 records that refusal
+as malformed, so it is no-match. Template `laya-noul-v1` asks one `noul` question and reads its `noul` value; template
+`laya-choice2-v1` asks the same question as a two-option `choice` with neutral keys, the card's workaround for issue
+#156, and reads the probability of the affirmative option. Either value passes through D5 unchanged: a finite number
+in `[0,1]` is `p`, and anything else is malformed. The response's `usage.input_tokens` is the actual token charge. A
+call not answered within 30 seconds is a timeout: the daemon kills the worker and D5 records no-match.
+
+*The manifest.* The daemon's package carries one reviewed manifest file, and an enablement document embeds its entry
+verbatim. The candidate entry below was checked on 2026-10-06 (§2); phase E2's gate confirms it or replaces it:
+
+```json
+{
+  "manifestId": "laya-en-onnx-68f27dfe",
+  "source": {
+    "host": "huggingface.co",
+    "repo": "receptron/laya-onnx",
+    "revision": "68f27dfe5a27a54fb2b1fefc432f43f972e90868"
+  },
+  "weights": {
+    "publisher": "Convai Innovations",
+    "origin": "convaiinnovations/laya",
+    "originSha256": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+    "licence": "Apache-2.0"
+  },
+  "files": [
+    { "path": "laya.onnx", "size": 3807291,
+      "sha256": "a874eb254b58b0fcb1e7ad56fbb188c29d64e08c9a46b689433e1f52c66dba1e" },
+    { "path": "laya.onnx.data", "size": 1685258240,
+      "sha256": "487746363a8da57bcadb4345352997d22a0fb90d70aa22c6856668d023242aba" },
+    { "path": "laya_config.json", "size": 369,
+      "sha256": "5049005dc6ae3ca5e82cc7d85c421357d5c543817300c8e8c5281ddbc69bb561" },
+    { "path": "tokenizer/tokenizer.json", "size": 3583228,
+      "sha256": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30" },
+    { "path": "tokenizer/tokenizer_config.json", "size": 308,
+      "sha256": "50044de60daaa73df97d262e15a40d4faf0160e7d742df64b377877a1320dd12" }
+  ],
+  "runtime": {
+    "@receptron/laya": "0.1.2",
+    "onnxruntime-node": "1.30.0",
+    "@huggingface/tokenizers": "0.2.0"
+  },
+  "context": { "maxTokens": 512, "language": "en" },
+  "promptTemplates": ["laya-choice2-v1", "laya-noul-v1"]
+}
+```
+
+`originSha256` records which Convai weights the exporter says it converted; the gate's parity check is the evidence
+that the ONNX bundle computes the same function.
+
+*Installation and download.* After the enablement's claim, and never before, the daemon:
+
+1. **Installs the runtime.** `@agentcomms/events-laya` is a separate library package of this repository's release.
+   It holds only the worker entry and pins the manifest's third-party versions exactly through a published
+   `npm-shrinkwrap.json`. The daemon installs it at its own release version into
+   `<dataDir>/events/laya/runtime/<version>/` the way core installs a managed runtime (§2), adding `--ignore-scripts`,
+   and then checks that the installed third-party versions equal the manifest's. Skipping scripts skips
+   `onnxruntime-node`'s linux/x64 NuGet download of CUDA providers this design never uses; the CPU binaries are
+   already in the package.
+2. **Downloads the model.** A fixed-purpose fetcher in the daemon requests each file as
+   `https://huggingface.co/<repo>/resolve/<revision>/<path>` with the full 40-hex revision, never a branch. It uses
+   HTTPS only and follows at most five redirects, each to HTTPS. Every hop's resolved addresses must pass D7's IANA
+   classification as globally reachable and must not be a metadata address; there is no approved address set,
+   because a CDN's addresses are not stable and no event data is sent. It sends no cookie, `Authorization` header or
+   Hugging Face token, and a `User-Agent` naming only the product and version. Bytes stream into
+   `<dataDir>/events/laya/models/<manifestId>.partial/` and are hashed as they arrive. A file that grows past its
+   manifest size is abandoned at once; a finished file whose size or SHA-256 differs is deleted and fetched again, at
+   most five times, after which the model is `failed` with a stable code. After a restart, a partial file is resumed
+   with a `Range` request once the bytes already held are re-hashed, or fetched again if the server ignores the range.
+   The download starts only if free space covers the remaining bytes plus ten per cent. When all five files verify,
+   one rename makes `<manifestId>/` and `laya_models` records `ready`.
+
+The directories are owner-only, as D12's state files are. The download carries no event content and does not depend
+on the global event switch. Disabling the kind cancels a download and deletes its partial directory; verified files
+survive a disable, so re-enabling the same entry downloads nothing, and `judge model remove` deletes them. Once
+`ready`, Laya needs no network at all. A release that changes the manifest entry or any pinned third-party version
+leaves `laya` disabled, with its verified files kept, until the person approves the new entry; a release that changes
+only this repository's own code installs that release's `@agentcomms/events-laya` as part of the same release.
+
+*Packaging and the app.* `@agentcomms/events-daemon` has no dependency on ONNX Runtime, `@receptron/laya` or the
+model, so a person who never enables Laya installs none of its roughly 300 MB of native binaries (§2).
+`@agentcomms/events-laya` lives in `packages/events-laya`, is published in lockstep with the other packages, declares
+`agentcommsPackage.kind: "library"` (D14) and is depended on by no package; in this repository pnpm's empty
+`allowBuilds` already keeps `onnxruntime-node`'s install script from running. The Tauri app contains no ONNX Runtime,
+worker, model or Node code and downloads nothing: as a client of the daemon (D12) it shows the enablement preview and
+approval, installation and download progress and the model's state. Its CSP, capabilities and installers are
+unchanged.
+
+*Stated limits.* Every Laya preview says: English checkpoint; 512-token context; CPU only; about 1.69 GB on disk,
+about 2 GB of memory while the worker runs, one call at a time; weights by Convai Innovations under Apache-2.0,
+converted to ONNX by a third party (receptron, MIT); accuracy in languages other than English is not established by
+this design. GPU execution providers and the multilingual checkpoint are D15.
+
+*The quality gate (phase E2).* Laya ships in a release only when its exact manifest entry, pinned runtime versions
+and each offered prompt template pass a labelled evaluation run on that release's code. The corpus is drawn from the
+owner's and colleagues' own Gmail and Slack messages under realistic rule questions and labelled by a person. It is
+kept outside the repository and never committed (`AGENTS.md`); only aggregate results are committed, as
+`packages/events-laya/gate/<manifestId>.json`, with each channel's item count, positive share and language mix. For
+Gmail and for Slack separately, with at least 200 labelled pairs and at least 30% positives each, a template passes
+only if expected calibration error over ten equal-width bins is at most 0.10, Brier score at most 0.20 and AUROC at
+least 0.80, using the bundle's own temperatures. That is how D5's **probability** label is earned on this data rather
+than taken from the model card, which itself says its probabilities need checking on your own data. The gate also
+requires the worker's `p` to be within 0.001 of the Python reference `laya` at the weights' source revision on every
+corpus item, a warm p95 latency of at most 2 seconds and peak worker memory of at most 3 GB on an Apple-silicon Mac,
+Windows x64 and Linux x64, and a report of inputs refused for length and of results per language. A template that
+fails is not offered; if neither passes, the `laya` kind is not offered in that release. The gate decides when Laya
+ships, not whether it is designed.
 
 ### D12. The daemon: one owner, one authenticated protocol
 
@@ -2018,14 +2265,16 @@ no recursive delivery case.
 **Shape:** Tauri v2, React, Vite, `@cueplusplus/ui` with `@cueplusplus/tokens` and
 `@cueplusplus/theme-cue`, a tray icon, the ordinary `settings` window and a separately labelled privileged
 `secrets` window. `secrets` is a distinct Tauri window/webview and entry document, never a React route inside
-`settings`.
+`settings`. The three CUE++ packages are public on npm under MIT (§2), so the app lives in this repository at
+`apps/desktop` and is built and released by this repository's CI (D14).
 
 **Screens:**
 
 1. **Overview** — the authoritative global enable/disable switch, daemon/protocol health, source lag, active
    exact/derived authorisation lineages with immutable authorisation ids and mutable current cut-over ids,
    superseded versions with retained work, recent delivery outcomes, held
-   decisions, pending approvals and every staged-position rule/replacement-drain/`enable-all` pending-completion or terminal-failed state with its
+   decisions, which judge kinds are enabled, whether each WhatsApp account's live lists are applied, pending
+   approvals (including judge-kind enablements) and every staged-position rule/replacement-drain/`enable-all` pending-completion or terminal-failed state with its
    deadline/new-approval action. Disable applies immediately; enable opens the D12 out-of-chat approval flow.
 2. **Sources** — accounts, event types, interval/budget, expected latency, shared acquisition cursors and per-rule
    activation points selected by each active pointer's current cut-over id, open Slack aggregate reply drains,
@@ -2038,11 +2287,13 @@ no recursive delivery case.
    and a changed secret URL still follows the new-version flow.
 5. **Deliveries** — filters, cancelled/retry/dead-letter states, retry only for `retryable`, drop, safely rendered
    dry-run rows, degraded reset barriers with `target resume`, and held decisions.
-6. **Judges** — exact inputs, hosted warning, human-only keys and local endpoints; bundled models are labelled as a
-   future design, not an installable option; key entry/rotation opens `secrets`.
+6. **Judges** — the three judge kinds, each shown off until enabled here: enable opens the D2 approval flow with
+   D11's preview, and disable applies immediately. Then exact inputs, the hosted warning, human-only keys, local
+   endpoints and, for Laya, its stated limits, licences, runtime installation and download progress, verified state
+   and remove-files action. Key entry/rotation opens `secrets`.
 7. **Approvals** — complete standing-authorisation preview and typed challenge.
-8. **Settings** — autostart, keep collecting after quit, event secret backend/migration, retention, data location and
-   about.
+8. **Settings** — autostart, keep collecting after quit, event secret backend/migration, retention, data location
+   (including the Laya model's disk use), and about, which states that version 1 is unsigned (D14).
 
 **Approval is equivalent to the terminal.** The webview supplies only an approval id, digest and typed response. The
 Rust layer fetches the authoritative preview from the daemon by id and digest; it never renders preview fields
@@ -2105,11 +2356,12 @@ still works, and direct invocation of every secret command from every non-`secre
 
 ```text
 apps/
-  desktop/                # Tauri + React + @cueplusplus/ui
+  desktop/                # Tauri + React + @cueplusplus/ui — in this repository, built and released by its CI
 packages/
   core/                   # gains D9's approval/audit/taint support; no event configuration or event-secret migration
   events/                 # NEW @agentcomms/events — isomorphic catalogue, pinned Unicode, conditions, mapping
-  events-daemon/          # NEW @agentcomms/events-daemon — I/O, ingest, approval, delivery, CLI, MCP
+  events-daemon/          # NEW @agentcomms/events-daemon — I/O, ingest, approval, delivery, CLI, MCP, Laya manifest
+  events-laya/            # NEW @agentcomms/events-laya — Node-only Laya worker; installed only on enablement (D11)
   gmail/ slack/ resend/ whatsapp/  # each gains operations/events.ts and manifest events
 ```
 
@@ -2139,7 +2391,10 @@ exported factory; `operations` is the package-relative directory whose exported 
 name. A service follows the Commander conventions `src/cli.ts`, `src/cli/program.ts` and exported `run`; changing
 those conventions requires new manifest fields rather than a package-name special case.
 
-`@agentcomms/events` is the library and `@agentcomms/events-daemon` the service. The existing registry begins channel
+`@agentcomms/events` and `@agentcomms/events-laya` are libraries and `@agentcomms/events-daemon` the service.
+`@agentcomms/events-laya` is Node-only, carries the native `onnxruntime-node` through its pinned dependencies and is
+depended on by no package: the daemon installs it as a managed runtime only when the person enables Laya (D11), and
+its import test runs in this repository, where pnpm runs no dependency install script. The existing registry begins channel
 discovery in `readChannels` and derives `SURFACES`/`DRIVERS` in `loadRegistry`
 (`scripts/channels.mjs:35,129`). It is extended to read strict `agentcommsPackage` declarations in the same package
 walk and produce `libraries` and `services` beside `channels`. Libraries feed publication and dependency ordering but
@@ -2177,15 +2432,38 @@ manifest cannot stop an adapter from reading the daemon's event secret store or 
 adapter waits for D15's separate security and acceptance design.
 
 All npm packages remain lockstep. The desktop has its own version but declares a tested daemon-protocol support
-matrix. Root `pnpm verify` runs the desktop TypeScript typecheck, unit tests and the TypeScript side of the shared
+matrix. `apps/desktop` joins the pnpm workspace (`pnpm-workspace.yaml` gains `apps/*`, §2), and its `@cueplusplus/*`
+dependencies install from the public registry with no token (§2), so a pull request from a fork builds and tests it
+like any other package. Root `pnpm verify` runs the desktop TypeScript typecheck, unit tests and the TypeScript side of the shared
 renderer vectors. The desktop workflow runs on macOS, Windows and Linux and, on **each** platform, runs
 `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
 `cargo test --all-targets --all-features`, the Rust side of the renderer/command/secret tests, and an unsigned Tauri
-build. Signing/notarisation is a later credentialed release job, not a substitute for this cross-platform build gate.
+build. Signing and notarisation are the wider-release gate below, not a substitute for this cross-platform build gate.
 
-If the CUE++ packages are not publicly installable when phase C is planned, that phase puts the app and its builds in
-a private repository; it does not weaken or skip fork CI here. Signing and notarisation remain a separate credentialed
-release design.
+**Desktop releases are unsigned for version 1.** Version 1 is for the owner and a few named colleagues. A
+`desktop-v<version>` tag, which the npm release workflow's `v*` pattern does not match (§2), runs a separate desktop
+release workflow in this repository. It repeats the cross-platform gate above, builds one universal macOS bundle and
+one Windows x64 installer, and attaches both, with their SHA-256 list, to a GitHub **prerelease** of this repository.
+The macOS bundle is signed ad hoc (`signingIdentity: "-"`), because Apple silicon requires some signature on an app
+from the Internet and an ad-hoc one needs no Apple identity; it is not notarised. The Windows installer is unsigned.
+The workflow holds no signing identity, certificate or signing secret. Version 1 has no in-app updater: a new version
+is downloaded and installed by hand. Linux keeps its CI build gate but ships no release artefact in version 1.
+
+The release notes and `apps/desktop/README.md` give the one-time first-launch steps, after comparing the download
+with the published SHA-256:
+
+- **macOS:** open the app once and dismiss the warning; then in System Settings, Privacy & Security, under Security,
+  choose **Open Anyway** (offered for about an hour after that attempt) and enter the login password. A new version
+  may need the same step again.
+- **Windows:** at "Windows protected your PC", choose **More info**, then **Run anyway**. Each new unsigned version
+  starts with no SmartScreen reputation, so the step can recur. Enterprise policy can remove the choice, and Windows
+  11's Smart App Control blocks unsigned files with no reputation, so a machine with it on cannot run version 1.
+
+**Signing gates any wider release.** Before the app is offered beyond the owner and the named colleagues—as a
+non-prerelease, a link outside that group, a store listing or an auto-update—the release job must sign the macOS
+bundle with an Apple Developer ID, notarise and staple it, and sign the Windows installer with a code-signing
+certificate, from credentials held only in that job's protected environment. The workflow enforces the mechanical
+part: without a signing configuration it publishes only prereleases and refuses to mark a release as latest.
 
 ### D15. Future designs, not contracts in this specification
 
@@ -2199,8 +2477,10 @@ release design.
   every credential human-only. That design must account for QStash's ten-minute dedupe window and inspect
   EventBridge's per-entry failures even on HTTP 200 ([QStash](https://upstash.com/docs/qstash/api-reference/messages/publish-a-message),
   [EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-putevents.html)).
-- **Bundled judge:** a future design must identify the model, licence, signed/checksummed download, runtime isolation
-  and labelled Gmail/Slack quality evaluation; nothing is bundled in the installer under this specification.
+- **Other local judge models:** D11 specifies one, Laya's English checkpoint on the CPU. Laya's multilingual
+  checkpoint, GPU execution providers, another runtime and any other local model each need their own manifest entry,
+  licence check, pinned checksummed source, isolation review and pass of D11's labelled Gmail/Slack gate, and no
+  model is ever put inside an installer.
 - **OS service:** a future design must cover per-platform identity, owner-only state, autostart/update recovery and the
   human-only installation credentials or privileges each operating system requires.
 
@@ -2211,15 +2491,17 @@ Each phase is specified, reviewed, planned and built separately. The order is by
 | Phase | Delivers | Depends on |
 |---|---|---|
 | A | Strict `agentcommsPackage.kind: "library"` discovery and release support in `scripts/channels.mjs` / `scripts/packages.mjs` plus the release tests; then isomorphic, publishable `@agentcomms/events`: Appendix A's exact catalogue, pointer/provenance patterns, semantic formats, bundled Unicode 15.1 case folding and UTS #46, conditions, mapping, generated source/delivery schemas and shared Node/browser conformance vectors; no I/O or `node:` imports | — |
-| B1 | Strict `agentcommsPackage.kind: "service"` discovery, publication, `SURFACES`/`DRIVERS`, generated-reference routing and parity scaffolding; then the publishable daemon skeleton: authenticated/versioned control protocol, stale recovery, owner-only authoritative SQLite state and global switch, AES-GCM per-rule projections, deterministic event ids, canonical Gmail source options, observation-time received/sent classification and required lazy-materialisation with terminal `vanished`/`unresolvable` resolution, one Gmail mailbox acquisition cursor plus per-rule-version/account activation points for every source, immutable rule-version authorisation lineage plus mutable active-pointer `currentCutoverId`, rule evaluation, core `disclosure` records/create-approve-claim/refusals with authoritative `usedAt` plus the three canonical activation documents and recoverable intents, bounded staged positions plus replacement drain-before-swap with mutation fences/failure settlement for every exact rule activation and `enable-all`, `active | superseded | revoked` rule-version lifecycle, inherited positions for derived tightenings, exact and derived standing-authorisation lineages and the `SECURITY.md` amendment, two-lock taint-origin sidecar and taint-before-every-judge/disclosure, independent daemon secret store/migration, atomic terminal-decision/complete-outbox/projection-purge transactions, terminal retention, outbox/leases/cancellation; every B1 operation already has a parity row, but **only** a local `dry-run` target with encrypted at-most-24-hour log and human-only safe reads | A |
+| B1 | Strict `agentcommsPackage.kind: "service"` discovery, publication, `SURFACES`/`DRIVERS`, generated-reference routing and parity scaffolding; then the publishable daemon skeleton: authenticated/versioned control protocol, stale recovery, owner-only authoritative SQLite state and global switch, AES-GCM per-rule projections, deterministic event ids, canonical Gmail source options, observation-time received/sent classification and required lazy-materialisation with terminal `vanished`/`unresolvable` resolution, one Gmail mailbox acquisition cursor plus per-rule-version/account activation points for every source, immutable rule-version authorisation lineage plus mutable active-pointer `currentCutoverId`, rule evaluation, core `disclosure` records/create-approve-claim/refusals with authoritative `usedAt` plus the four canonical activation documents (no judge kind is usable before E) and recoverable intents, bounded staged positions plus replacement drain-before-swap with mutation fences/failure settlement for every exact rule activation and `enable-all`, `active | superseded | revoked` rule-version lifecycle, inherited positions for derived tightenings, exact and derived standing-authorisation lineages and the `SECURITY.md` amendment, two-lock taint-origin sidecar and taint-before-every-judge/disclosure, independent daemon secret store/migration, atomic terminal-decision/complete-outbox/projection-purge transactions, terminal retention, outbox/leases/cancellation; every B1 operation already has a parity row, but **only** a local `dry-run` target with encrypted at-most-24-hour log and human-only safe reads | A |
 | B2 | Network hardening, plain/secret webhook URLs with URL changes creating new target versions, pinned resolution, HTTPS webhooks with only the literal-loopback HTTP exception, HTTP-only literal-loopback local judges, Standard Webhooks per-attempt signing/rotation, webhook delivery/manual-retry state fences, durable reset barriers/degraded resume, authenticated generation-bound SSE with rotation close, exact-origin CORS, replay retention and version-bound purge | B1 |
 | B3 | The full D10 CLI/MCP surface on B1's service/parity scaffolding and all exception rows, the complete named human-only secret-operation set and migration, dry-run reads and target resume, lineage/pending-completion `doctor`, event skill | B2 |
-| C | Desktop app and tray lifecycle, separate privileged `secrets` window, per-window capabilities, production no-egress CSP/navigation policy, Rust approval/secret surfaces, supervision and protocol compatibility | B3 |
+| C | Desktop app in `apps/desktop` of this repository, joining the pnpm workspace, and tray lifecycle, separate privileged `secrets` window, per-window capabilities, production no-egress CSP/navigation policy, Rust approval/secret surfaces, supervision and protocol compatibility; the unsigned version-1 `desktop-v*` prerelease workflow, its first-launch documentation and the signing gate for any wider release | B3 |
 | D | Slack, Resend and WhatsApp sources, including resumable Slack pagination and aggregate top-level/reply drain barriers, Resend required-detail terminal resolution and Unicode-code-point normalisation, and WhatsApp event-owned raw-key generation diffs using the protocol message key, never `Z_PK` or an index-derived sender; each ships with per-source taint and reset/fairness tests | B1 |
-| E | Hosted/local judges, holds, rolling durable budgets with crash-settled reservations, adversarial corpus; refuses to build or ship unless B3's secret-completion and human-only capability surfaces are present | B3 (C for app hold resolution) |
-| F | Reserved for the five separate future designs in D15; this specification supplies no implementation or acceptance contract for them | D, E |
+| E | Judge-kind enablement with every kind off until enabled, hosted Jev and `local-endpoint` judges, holds, rolling durable budgets with crash-settled reservations, adversarial corpus; refuses to build or ship unless B3's secret-completion and human-only capability surfaces are present | B3 (C for app hold resolution and the Judges screen) |
+| E2 | The `laya` judge kind: the reviewed manifest, `@agentcomms/events-laya` with its pinned shrinkwrapped runtime, managed installation with scripts ignored, the verified, resumable model download, the isolated worker and its fences; ships in a release only when D11's labelled Gmail/Slack quality gate passes for that manifest entry and template | E (C for the app's enablement and progress screens) |
+| F | Reserved for the five separate future designs in D15; this specification supplies no implementation or acceptance contract for them | D, E, E2 |
 
-No phase before B2 can make network disclosures. No new source ships without taint-before-disclosure.
+No phase before B2 can make network disclosures. No new source ships without taint-before-disclosure. No judge of
+any kind is callable before E, and none afterwards until the person enables its kind.
 
 ## 5. Tests the phases owe
 
@@ -2270,6 +2552,29 @@ No phase before B2 can make network disclosures. No new source ships without tai
   version has its own ten. Concurrent rules with different per-rule limits share one daemon/per-provider ceiling,
   and any provider/global field in a rule is refused.
   All automated transports are loopback fakes or injected functions.
+- **Judge kinds and Laya:** a new database, an install, an update and an import each leave all three kinds disabled;
+  deterministic-only rules activate and deliver with every kind disabled. Preparing, claiming and finalising a rule
+  activation whose judge's kind is disabled each refuse `JUDGE_KIND_DISABLED`, including a disable injected between
+  prepare and claim and between claim and finalisation. Enablement is refused from chat and MCP approval and claim,
+  and succeeds through the terminal and the app. Disabling a kind, at every worker boundary, cancels and purges
+  waiting decisions, deliveries, dry-run rows and SSE entries bound to its judges, releases or pessimistically settles
+  their reservations, discards a late result, needs no approval, and leaves rule and judge versions unrevoked; a new
+  enablement then restores exactly the listed rules. A `typesafe` enablement alone makes no request to TypeSafe. For
+  `laya`, with an injected registry and a loopback fake of Hugging Face and its CDN: nothing is installed or fetched
+  before the claim; the runtime install passes `--ignore-scripts` and refuses third-party versions that differ from
+  the manifest; every request names the full revision and carries no cookie, `Authorization` or token; a redirect to
+  HTTP, a sixth redirect and a hop resolving to a private, link-local or metadata address are refused; an oversized
+  file is abandoned at once; a size or SHA-256 mismatch is deleted, retried and after five failures is `failed`; a
+  restart resumes by `Range` after re-hashing, and restarts the file when the range is ignored; insufficient space
+  refuses to start; disabling mid-download deletes the partial directory; and only the final rename makes `ready`.
+  The worker refuses to load a tampered file, inherits no `AGENT_COMMS_*`, token, proxy, `LAYA_*` or `NODE_OPTIONS`
+  variable or extra descriptor, and opens no socket during load or calls; the package's own downloader is never
+  reached. A worker crash and a 30-second hang each yield no-match with the worker killed and later restarted; an
+  input the tokenizer would truncate is refused as malformed; wrong-typed, non-finite or out-of-range output is
+  malformed; a `laya` concurrency ceiling above 1 is refused; and the worker exits after ten idle minutes. Fast tests
+  use an injected stand-in for `@receptron/laya`; the real bundle runs only in the E2 gate job, never in
+  `pnpm verify`. The gate harness commits only aggregate results, refuses a corpus file inside the repository, and
+  fails a release that offers a template without a passing result for its exact manifest entry.
 - **Mapping and wire:** constants, objects/arrays, every missing policy, both representations and generated schemas;
   golden Node/browser vectors prove `omit` removes an object property and is refused at an array element and at the
   root, while `reject` and `null` have identical defined behavior at all three positions;
@@ -2284,7 +2589,9 @@ No phase before B2 can make network disclosures. No new source ships without tai
   delivery vector also asserts the exact outbound header
   `Content-Type: application/cloudevents+json; charset=utf-8` beside those body and signature bytes; no binary-mode
   `ce-*` header is required or substituted.
-- **Digest, approvals and activation recovery:** golden vectors for the three canonical activation documents. Rule
+- **Digest, approvals and activation recovery:** golden vectors for the four canonical activation documents,
+  including D2's judge-kind vectors and a proof that a rule, budget or enable-all approval cannot be claimed as a
+  judge-kind enablement or the reverse. Rule
   vectors mutate source/account scope, a newly connected but unselected account, every Gmail label, `any`/`inbox`
   selector transition and `includeSpamTrash`, every Slack conversation id, every Resend kind, every WhatsApp
   chat/select-all transition, the optional rule-defined CloudEvents type,
@@ -2408,12 +2715,15 @@ No phase before B2 can make network disclosures. No new source ships without tai
   contain neither event id nor channel. Forced base or sidecar write failure
   proves no hosted/local judge call, webhook or readable dry-run/SSE append occurs; errors stay untrusted and reason
   codes constrained.
-- **Retention:** held-decision expiry produces `hold-expired` with no delivery; unevaluated ingest and rate-cap backlog
+- **Retention:** a rule saved with no retention fields stores, previews and digests exactly the owner's defaults:
+  seven days for ingest content, hold, delivery, SSE replay and dead-letter payload, 24 hours for dry-run and 90 days
+  for decision metadata; a golden vector pins those values, and the equal hold and ingest defaults save. SSE replay
+  above seven days and dry-run above 24 hours are refused. Held-decision expiry produces `hold-expired` with no delivery; unevaluated ingest and rate-cap backlog
   reach `retention-expired`; save refuses `hold > ingest`; cancellation purges payload in its pointer-change
   transaction; webhook success, dead-letter expiry/drop and independent multi-target deadlines purge exactly their
   encrypted records. Dry-run retention above 24 hours is refused, its expiry purges the encrypted row, and safe reads
   after expiry fail without recovering bytes. Every ordering of ingest, hold, delivery, dry-run, dead-letter and
-  decision-metadata deadlines proves no deadline extends another; at 30 days or the approved shorter value the
+  decision-metadata deadlines proves no deadline extends another; at 90 days or the approved shorter value the
   decision purge clears expiring metadata, retains only the uniqueness tombstone and cannot trigger re-evaluation.
 - **Encryption and installation reset:** packed-record round trips for every encrypted column in per-rule ingest
   projections, source staging, decisions, deliveries, dry-run log, reset delivery and stream log;
@@ -2580,14 +2890,22 @@ No phase before B2 can make network disclosures. No new source ships without tai
   egress while Tauri IPC still works; every non-`secrets` window is denied every secret command and secret bytes occur
   only in the one allowed IPC pair.
   On macOS, Windows and Linux the desktop workflow runs Rust fmt, clippy with warnings denied, tests and an unsigned
-  Tauri build.
+  Tauri build, installing the `@cueplusplus/*` packages with no registry token, as a fork's pull request would. The
+  desktop release workflow runs only on a `desktop-v*` tag and an npm `v*` tag does not start it; with no signing
+  configuration it creates only a prerelease, attaches the ad-hoc-signed macOS bundle, the unsigned Windows installer
+  and their SHA-256 list, refuses to mark a release as latest, and fails if the release notes lack the macOS and
+  Windows first-launch steps. A static check proves the workflow references no signing secret. The built app bundle
+  contains no ONNX Runtime binary, Laya worker or model file.
 - **Parity, phases and packaging:** every capability row is driven on CLI and MCP and every exception reason checked;
   dry-run reads, target resume, every named secret operation and event-secret migration have explicit
   terminal/app-only rows and no MCP exposure; no `"agentcomms"` non-channel kind. Both `agentcommsPackage` kinds
   publish in dependency order; an otherwise unknown fixture service appears automatically in publication,
   `SURFACES`, `DRIVERS`, generated CLI/MCP references and executed parity, while an explicit library is the only
   surface-free published kind. Browser import has no `node:` edge; root verify runs the TypeScript desktop/vector
-  side. A phase-E gate deliberately removes or stubs B3 secret completion and human-only operations and proves judges
+  side. `@agentcomms/events-laya` publishes as a library in lockstep with its `npm-shrinkwrap.json`, no published
+  package depends on it, and the resolved dependency tree of `@agentcomms/events-daemon` contains no
+  `onnxruntime-node` or `@receptron/laya`. Judge-kind operations have CLI and MCP rows; `judge kind enable` from MCP
+  only prepares. A phase-E gate deliberately removes or stubs B3 secret completion and human-only operations and proves judges
   then refuse to build or ship.
 
 ## 6. Out of scope
@@ -2612,7 +2930,8 @@ are in scope only through the approved
    semantic error.
 4. **Content exists at rest.** Ingest, outbox and stream replay require retained content. Application-level
    AES-256-GCM keeps plaintext out of SQLite pages, WAL and free-page residue, while approval-bound retention and
-   prompt purge bound duration. A same-user process that can use a current installation master key is outside this design's
+   prompt purge bound duration. The owner chose seven days as the default for content (§8), which keeps more at rest
+   for longer than the earlier 24 hours; each rule can shorten it without approval. A same-user process that can use a current installation master key is outside this design's
    protection, as `SECURITY.md:51-63` states.
 5. **Provider limits can make polling slow.** Slack may be one call/minute, Gmail can invalidate cursors, and Resend
    shares its budget with interactive work. The schedulers prefer correctness and interactive use over low latency,
@@ -2626,24 +2945,49 @@ are in scope only through the approved
 6. **The app is a high-value approval surface.** The authoritative record and digest stay in the daemon; Rust
    re-fetches and text-renders them, custom commands are per-window, and hostile-preview/digest-drift tests are release
    gates.
-7. **Desktop distribution can lag the daemon.** Private CUE++ dependencies move the app/build into a private
-   repository, and signing/notarisation waits for its separate credentialed release design; neither weakens or delays
-   the daemon's safety gates.
+7. **Unsigned builds teach people to click through warnings.** Version 1's macOS and Windows builds are unsigned by
+   the owner's choice and are for the owner and a few named colleagues only. The first-launch steps name the exact
+   dialogs and the SHA-256 to compare first, releases stay prereleases, and signing and notarisation gate any wider
+   release (D14). A machine with Windows 11's Smart App Control on, or an enterprise policy that removes **Run
+   anyway**, cannot run version 1. None of this weakens the daemon's safety gates.
+8. **A local model is large, young and someone else's.** Laya's runtime is a third party's 0.1.2, its ONNX bundle is
+   a third party's export, and its own card says the probabilities need checking on your own data. It costs about
+   1.69 GB of disk and 2 GB of memory and covers English only. It is off until the person enables it, every byte and
+   version is pinned and verified, it runs in an isolated worker with no network, and it ships only when D11's
+   labelled gate passes.
 
-## 8. Open questions for the owner
+## 8. Owner decisions (2026-10-06)
 
-1. **"Leia"** — which model is meant? Nothing by that name was documented in the research; Laya is a different
-   publisher and only a candidate for D15's future bundled-judge design.
-2. **“Values as they are”** — this design means typed, sanitised source values with no transforms, not provider raw
-   bytes. Is that the accepted product meaning?
-3. **`@cueplusplus/ui` public, or the app in a private repository?** The packages are MIT but their npm scope is
-   private (§2). D14's default, if nothing changes by phase C, is a private repository for the app; publishing
-   `@cueplusplus/ui`, `@cueplusplus/tokens` and `@cueplusplus/theme-cue` would let it live in `apps/desktop` here.
-4. **Signing identities** — an Apple Developer ID and a Windows code-signing certificate for the app's later release
-   job: who holds them?
-5. **Defaults** — hosted judges (event fields sent to TypeSafe) are available but every use needs its own standing
-   authorisation; should they instead be off unless enabled? And are the default retention values above (24 hours for
-   content, 30 days for decision metadata) right for your accounts?
+The owner answered the five open questions on 2026-10-06. Each answer is folded into the design wherever it
+applies; this list says what was decided and where it landed.
+
+1. **"Leia" is Laya**, by Convai Innovations: an open-source, Jev-compatible typed-decision model, to be packable
+   into this build, optionally. Landed as the `laya` judge kind: facts and sources in §2; D11 (kind, runtime,
+   isolated worker, manifest, installation and download, packaging, limits, quality gate); D2 (judge-kind enablement
+   document and digest vectors); D5 (probability label); D8 (`laya_models`); D10 (`judge kind` and `judge model`
+   operations); D13 (Judges screen); D14 (`packages/events-laya`); D15 (narrowed to other local models); §4 phase E2;
+   §5 "Judge kinds and Laya"; §7 risk 8.
+2. **"Values as they are" means clean typed values**: typed, sanitised source values with no transforms, never the
+   provider's raw bytes. Landed in D6 (what a `$path` leaf delivers), D3 (prose representation) and Appendix A.1.
+3. **The desktop app lives in this repository at `apps/desktop`.** The CUE++ packages are public on npm under MIT,
+   correcting the round-1 research (§2). Landed in D13 (shape), D14 (tree, workspace, CI and release), §4 phase C and
+   §5; the private-repository fallback is removed from D14 and §7.
+4. **Unsigned for now.** Version 1 ships unsigned macOS and Windows builds to the owner and a few colleagues, with
+   one-time first-launch steps; Apple Developer ID signing with notarisation and Windows code signing are the stated
+   gate before any wider release, and version 1 needs no signing identity. Landed in D14 (release workflow,
+   first-launch steps, signing gate), D13 (Settings, about), §2 (Tauri, Apple and Microsoft sources), §4 phase C, §5
+   and §7 risk 7.
+5. **Defaults.** (a) **Every judge kind is off until enabled**: hosted Jev, local Laya and a local endpoint each need
+   the person to enable that kind, as its own approval separate from any rule's; hosted Jev keeps its per-use
+   standing authorisation on top, enabling Laya starts its download, and deterministic conditions work from the start.
+   Landed in D2 (approval rule, fourth activation document, whitelist, boundary fence, `SECURITY.md` text), D5, D8,
+   D10, D11, D13, §4 phase E and §5. (b) **Retention defaults are seven days for event content and 90 days for
+   decision metadata**: ingest, hold, delivery, SSE replay and dead-letter payload default to seven days, dry-run
+   keeps its 24-hour default and cap, decision metadata defaults to 90 days, and `hold ≤ ingest` still holds. Landed
+   in D2 (canonical rule document and vectors), D7 (SSE row, hold and metadata defaults), D8 (defaults paragraph), §5
+   "Retention" and §7 risk 4. No cap had to change: dry-run is still capped at 24 hours, SSE replay's seven-day
+   default now equals its cap, and equal hold and ingest defaults satisfy `hold ≤ ingest`. The one consequence worth
+   naming is that content now stays at rest up to seven days by default rather than 24 hours (§7, risk 4).
 
 ## 9. Open review items (round 19)
 
@@ -2690,6 +3034,10 @@ The notation below maps mechanically to JSON Schema 2020-12:
   ([JSON Schema validation §6.3.1](https://json-schema.org/draft/2020-12/json-schema-validation#section-6.3.1)); and
 - `NonEmptyString` is a JSON string with `minLength: 1`; plain `string` may be empty. Array order is retained unless
   this appendix says the array is canonical-sorted.
+
+Every catalogue value is a **clean typed value**, the thing D6 copies: normalised by the adapter to the type shown
+here and, where it is sender-controlled prose, already through D3's sanitiser. No field holds a provider's raw bytes,
+raw HTML or MIME source, undecoded encoding or an untrusted envelope.
 
 Every generated source schema has `$schema: "https://json-schema.org/draft/2020-12/schema"` and exact
 `$id: "urn:agentcomms:schema:source:<catalogue-type>:v1"` (for example
