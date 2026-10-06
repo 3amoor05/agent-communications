@@ -115,6 +115,9 @@ If a profile sign-in ends before a token is stored, report Slack's error and des
 available and say the sign-in did not complete. The person may have declined, or the workspace may
 require an administrator to approve the app; never state that the person declined as a fact. Name
 the organisation, workspace name and id, and the profile app's role and Client ID from the result.
+If the person says Slack's page showed `invalid_team_for_non_distributed_app`, their browser was
+signed in to another workspace: ask them to sign in to the workspace the profile names in that
+browser, then start the sign-in again — not to ask an administrator.
 If an MCP client cancels a waiting `slack_workspace_finish`, the detached sign-in stays open and can
 be finished later. Interrupting a detached CLI `workspace add --finish` or `reauth --finish` also
 leaves the flow open: after consent, run `--finish` again. Interrupting a foreground sign-in ends its
