@@ -1,8 +1,9 @@
 # Local event emission — design
 
-Status: **revised with the owner's answers on 2026-10-06; awaiting review round 20.** The owner's five answers are
-folded into the design and listed, with where each landed, in §8. Rounds 1–18 were resolved; round 19's two findings
-are closed in D4, D8, D9 and D12, and §9 records where. Specification only, not an implementation.
+Status: **revised with the owner's answers on 2026-10-06 and for review round 20; awaiting review round 21.** The
+owner's five answers are folded into the design and listed, with where each landed, in §8. Rounds 1–18 were resolved;
+round 19's two findings are closed in D4, D8, D9 and D12, and §9 records where; round 20's three findings are closed
+in D4/D8 (WhatsApp stage expiry), D11 (runtime lock and integrity) and D11/D2 (operating-system network boundary). Specification only, not an implementation.
 Written from the cited research pass (§2) and a checked read of this repository at `90463e1`, whose code is release
 0.13.0. The 2026-10-06 revision's new repository citations are to `6f6a9de4` (release 0.14.0) and say so; files such as
 `packages/core/src/approvals.ts` have moved since `90463e1` (the unions this design describes are unchanged), so phase
@@ -103,9 +104,13 @@ repository, registry entry or documentation; content read there was treated as d
 | `@receptron/laya` 0.1.2 (MIT; first published 2026-09-19, last changed 2026-09-21; Node ≥ 20; depends on `onnxruntime-node` `^1.22.0` and `@huggingface/tokenizers` `^0.2.0`) runs Laya from Node through ONNX Runtime with Jev's `system_one` request and response shape, and states that its output matches the Python implementation to four decimal places. `Laya.load({ modelDir })` reads only that directory; without `modelDir`, its own downloader fetches from Hugging Face, defaults to revision `main`, follows redirects and compares only file sizes. Its README gives about 1.7 GB of fp32 weights on first use, roughly 2 GB of RAM, about 140 ms for three questions on a warm Apple-silicon CPU, and a 512-token state. Open issues #10 and #11 report that a `choice:11+` temperature of 0.1006 makes answers with eleven or more options about 99% confident. | [npm `@receptron/laya`](https://www.npmjs.com/package/@receptron/laya) (`npm view`); [`receptron/laya`](https://github.com/receptron/laya): README, `src/laya.ts:41-57`, `src/download.ts:15-67`, commits and issues |
 | Its default bundle is a separate third-party export, Hugging Face `receptron/laya-onnx` (card licence `apache-2.0`; "Weights are Convai Innovations' and remain under Apache 2.0. Export code: MIT"), with one commit, `68f27dfe5a27a54fb2b1fefc432f43f972e90868` of 2026-09-19, and the English checkpoint only. Its five files total 1,692,649,436 bytes; D11 lists each size and SHA-256. Its `laya_config.json` temperatures equal those in Convai's current `rl_agent_config.json`. Hugging Face answers a large-file request with HTTP 302 to a CDN host (`us.aws.cdn.hf.co` was observed) and names the revision in `x-repo-commit`. | Hugging Face model and tree APIs at that revision (SHA-256 of the two large files from their LFS records; the three small files fetched and hashed, and their git blob ids match the tree); `curl -I` of `laya.onnx.data` |
 | `onnxruntime-node` 1.30.0 (MIT) is a 113,507,888-byte tarball, about 301 MB unpacked, with CPU binaries for macOS, Linux and Windows on x64 and arm64. Its `postinstall` downloads the CUDA 12 provider from NuGet on linux/x64 unless `--onnxruntime-node-install=skip` or `ONNXRUNTIME_NODE_INSTALL=skip` is given. | `npm view onnxruntime-node`; the tarball's `Content-Range`; [`js/node/script/install.js` and `install-metadata.js` at `v1.30.0`](https://github.com/microsoft/onnxruntime/tree/v1.30.0/js/node/script) |
+| Resolved on its own, the runtime `@receptron/laya` 0.1.2 with `onnxruntime-node` 1.30.0 and `@huggingface/tokenizers` 0.2.0 has a 19-package dependency closure, every package MIT, Apache-2.0, BSD-3-Clause, ISC or MIT-or-CC0; only `onnxruntime-node` declares an install script. Each registry entry carries an `sha512` integrity value for its tarball. | `npm install --package-lock-only --ignore-scripts` into an empty scratch project with no user configuration (npm 10.9.8), reading the resulting lockfile; nothing was installed or run |
 | `@cueplusplus/ui` 0.20.1, `@cueplusplus/tokens` 0.20.1 and `@cueplusplus/theme-cue` 1.1.1, and `@cueplusplus/theme-base` 1.3.0, on which `ui` depends, are **public on npm under MIT**: an anonymous `npm view` (no token, empty user configuration) returned each. Their repository is `cueplusplus/cue-ui`; they need Node ≥ 22, and `ui` lists React 19 and Tailwind 4 among its peers. This corrects the round-1 research, which found the scope private. | `npm view <package> --userconfig /dev/null --registry https://registry.npmjs.org/` |
 | Tauri can sign a macOS app ad hoc with `signingIdentity: "-"`, which needs no Apple identity and which Tauri calls useful on Apple silicon, "where code-signing is required for all apps from the Internet"; ad-hoc signing does not stop macOS from requiring the person to allow the app. Apple's steps for an app from an unidentified developer: System Settings, Privacy & Security, then under Security **Open Anyway**, offered for about an hour after the attempt to open it, then the login password. | [Tauri macOS signing](https://v2.tauri.app/distribute/sign/macos/), [Apple: open a Mac app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac) |
 | For an unsigned Windows file, Microsoft Defender SmartScreen shows "Windows protected your PC" and the person must choose **Run anyway**, shown after **More info**, before it runs. Enterprise policy can remove that choice, an unsigned file starts with no reputation on every new version, and on Windows 11 Smart App Control blocks unsigned files that have no positive reputation. | [Microsoft: SmartScreen reputation for Windows app developers](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation); [BleachBit's SmartScreen page](https://www.bleachbit.org/microsoft-defender-smartscreen) for the "More info" step |
+| macOS ships `/usr/bin/sandbox-exec`, whose manual page calls it "DEPRECATED" and points developers to App Sandbox. On this machine (macOS 14.5), a Node process run under the profile `(version 1) (allow default) (deny network*)` got `EPERM` for a TCP connection and for a `fetch` to a loopback listener started outside it, and `EPERM` for a Unix-domain socket connection to a live listener, while its stdin pipe kept working; the same calls outside the profile connected, and neither listener saw a connection from the sandboxed process. | `man sandbox-exec`; a local test with Node against loopback and Unix-domain listeners only, no external traffic |
+| Linux `unshare` (util-linux) creates a new network namespace with `--net`, and a user namespace with `--user`, mapping the caller to the same ids with `--map-current-user` or to root with `--map-root-user`; bubblewrap offers `--unshare-net`. Ubuntu 23.10 and later can restrict unprivileged user namespaces through AppArmor (`kernel.apparmor_restrict_unprivileged_userns`), allowing them only to programs whose profile has a `userns` rule or to holders of `CAP_SYS_ADMIN`. | [`unshare(1)`](https://man7.org/linux/man-pages/man1/unshare.1.html), [Ubuntu: restricted unprivileged user namespaces](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces) |
+| On Windows, an AppContainer process without the network capability cannot access the network. Launching one takes `CreateAppContainerProfile` and `CreateProcess` with a `STARTUPINFOEX` attribute list carrying `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`, which Node's `child_process` cannot express. | [Microsoft: AppContainer isolation](https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation), [Microsoft: Launch an AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer) |
 
 ## 3. Decisions
 
@@ -232,9 +237,9 @@ The four kinds have these exact version lists and effects:
    fence, not a versioned object and never a `versions` kind.
 4. A **judge-kind enablement** has exactly one `judge-kind` entry for that kind's immutable enablement version and
    atomically replaces only that kind's enablement pointer. Its canonical document (D11) names the kind and, for
-   `typesafe`, the fixed endpoint, or, for `laya`, the complete model manifest entry: source host, repository and
-   40-hex revision, every file's path, byte size and SHA-256, the pinned third-party runtime versions and the prompt
-   templates. It contains no rule, judge, budget, account or event field and authorises no disclosure by itself: a
+   `typesafe`, the fixed endpoint, or, for `laya`, the complete model manifest entry (source host, repository and
+   40-hex revision, every file's path, byte size and SHA-256, and the prompt templates) and the runtime lock's
+   package list with each `sha512` integrity and this platform's file-list digest. It contains no rule, judge, budget, account or event field and authorises no disclosure by itself: a
    judge of that kind still needs an approved rule activation naming its exact version and the active budget.
    Enabling `laya` also starts D11's runtime installation and model download.
 
@@ -274,8 +279,8 @@ Golden digest vectors cover all four document kinds. Rule vectors change one fie
 id, a newly connected but unselected account, each source option, an ordinary URL path, a secret-URL fingerprint,
 mapping constant, missing policy, referenced object version, each per-rule judge limit and each retention default.
 Budget vectors change each daemon/provider ceiling and the singleton version. Judge-kind vectors change the kind, the
-hosted endpoint, the Laya manifest revision, each file's path, size or SHA-256, each pinned runtime version and the
-prompt-template list. Enable-all vectors change the switch generation, add,
+hosted endpoint, the Laya manifest revision, each file's path, size or SHA-256, each runtime-lock package, integrity
+value and platform file-list digest, and the prompt-template list. Enable-all vectors change the switch generation, add,
 remove or reorder a rule-version id, and prove canonical sorting makes only reorder a no-op. Cross-kind vectors prove
 the same nested JSON under another `kind` has another digest. Every active or superseded rule version is authorised
 in exactly one of two mechanically checked ways: an activation whose disclosure approval names that exact version, or a
@@ -486,8 +491,8 @@ terminal-only `approve` exception (`capabilities.json:241-254`) and the rule tha
 chat because the transcript retains it (`docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:81-90`).
 Credential exposure to model context is already in scope as a vulnerability (`SECURITY.md:32-33`).
 
-**Required `SECURITY.md` amendment.** Phase B1 adds the following exact bullets; this specification does not edit
-`SECURITY.md` itself:
+**Required `SECURITY.md` amendment.** Phase B1 adds the following exact bullets, except the two Laya bullets, which
+phase E2 adds with Laya; this specification does not edit `SECURITY.md` itself:
 
 > - **Disclosure without a standing authorisation** — any webhook or subscriber stream receiving event-derived
 >   content, or any hosted or local judge being invoked with it, without an active, digest-bound standing
@@ -495,6 +500,10 @@ Credential exposure to model context is already in scope as a vulnerability (`SE
 >   including the complete validated derivation lineage for the exact effective rule, target, subscriber and judge
 >   versions; after that authorisation is revoked; while the judge's kind is not enabled; outside its approved mapping,
 >   retention or delivery rate cap; or without successful taint recording before disclosure.
+> - **Network access by the Laya worker** — on macOS or Linux, any network connection made by the Laya worker
+>   process; the Laya runtime or model being loaded before the operating-system network boundary named for that
+>   platform has passed its start-up check; or any runtime or model file being loaded that does not match the
+>   release's runtime lock and model manifest.
 
 and, under "What the safety model does not claim":
 
@@ -503,6 +512,12 @@ and, under "What the safety model does not claim":
 >   target or be evaluated by its approved judge. `agent-events doctor` and the app list every active authorisation.
 >   Disabling or removing any bound rule, target, subscriber or judge, or disabling a judge kind, revokes it
 >   immediately; content already in a network operation cannot be recalled.
+> - **Laya is kept off the network by the operating system, and only where stated.** On macOS the boundary is a
+>   `sandbox-exec` profile that denies all network access, and Apple marks `sandbox-exec` deprecated; on Linux it is a
+>   new network namespace, which needs unprivileged user namespaces; Laya is not offered on Windows in this version.
+>   Code inside the worker that refuses network calls is defence in depth, not the boundary. The boundary does not
+>   protect against another process of the same user, and the daemon's one-time downloads of the Laya runtime and
+>   model are ordinary network traffic.
 
 ### D3. The event catalogue: typed, versioned, and explicit about trust
 
@@ -750,7 +765,21 @@ switch is disabled, gets its ledger row with no staged representation; the admis
 it. A staged representation is purged in the transaction that leaves no version owed it—once every owed version has
 its admission row and, if `admitted`, its committed projection—or earlier by a revoking action, `disable-all` or D9's
 visibility purge. All of this commits before `syncAccount` disposes the checked copy in its `finally` (§2), so nothing
-an admission needs exists only in that copy. No
+an admission needs exists only in that copy.
+
+**A staged first representation cannot outlive an approved ingest retention.** When it is staged, it receives an
+absolute `stageExpiresAt`: the staging transaction's time plus the **shortest** ingest retention among the rule
+versions that may be owed it then, read from each version's approved document (for a version under a nonterminal
+activation intent, from its pending document). The owed set can only shrink, so the deadline is never moved later,
+and the one shared copy is never kept for a version with a longer retention beyond another owed version's approved
+retention; it is purged at the shortest. At `stageExpiresAt`, if any owed version still lacks a committed projection,
+one transaction purges the staged record and, for each such version, writes the content-free terminal admission
+`expired`: it is inserted where the version has no admission row yet, and it replaces an `admitted` row whose
+projection has not committed, which is the only change an admission row may undergo. No later generation, drain,
+retry or restart can then admit or project that key for that version. The transaction also increments a content-free
+`doctor` count of expired WhatsApp first representations with the last expiry time; it records no key, payload or
+sender. Expiry uses database time, and start-up runs it before any source or worker, so daemon downtime counts
+against the deadline. No
 normalisation happens in that candidate-write transaction. Only after the pointer/diff transaction commits may
 cleanup delete older generations. If the process restarts before that transaction, the pointer still names the prior
 generation and every other generation is an uncommitted candidate that is discarded; if it restarts after the
@@ -1430,7 +1459,7 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   only for ordered sources, records when the complete scope barrier reaches P and keeps after-P occurrences staged
   until the atomic swap. For WhatsApp it instead records completion only after D12 has resolved, from their staged
   first representations, every key the old version is owed at P—the checked baseline set and every earlier-staged key
-  still lacking an old-version admission—through the old version's own admissions; its
+  still lacking an old-version admission—through the old version's own admissions, an `expired` one included; its
   `{ T, baselineGeneration, baselineIdentities }` triple and no high-water key are the fence. The new version's baseline admissions are not drain completion and cannot conflict
   with those old-version rows.
   For Slack, `slack_reply_drains(intentId, accountId, conversationId, threadTs, cursor, coveredThrough,
@@ -1446,7 +1475,9 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   occurrence-ledger key whose raw `(chatJid, senderJidRaw)` D9's live-list check evaluates; `decisions`, `deliveries`,
   `dryrun_log` and `stream_log` carry the same nullable column under the same rule;
 - `whatsapp_occurrences(accountId, messageId, firstSeenGeneration, firstSeenAt, visibilityVersion,
-  stagedPayloadRef?, eventId?, PRIMARY KEY(accountId, messageId))` is the account-global **occurrence ledger**.
+  stagedPayloadRef?, stageExpiresAt?, eventId?, PRIMARY KEY(accountId, messageId))` is the account-global
+  **occurrence ledger**. `stageExpiresAt` is D4's fixed deadline for the staged first representation, present exactly
+  when `stagedPayloadRef` is.
   `messageId` is A.7's canonical raw key; `firstSeenGeneration`, time and staged-payload reference are immutable.
   The reference names the key's encrypted first representation in D8 source staging, written by the same
   pointer/diff transaction that inserts the row; it is null when no version could be owed the key then (D4), and the
@@ -1458,10 +1489,12 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   while the ledger survives disappearance and index rebuilds;
 - `whatsapp_rule_admissions(accountId, messageId, ruleId, ruleVersion, admission, activationId,
   visibilityVersion, admittedAt, PRIMARY KEY(accountId, messageId, ruleId, ruleVersion))` is the independent
-  per-rule-version admission ledger, with the closed `admission` enum `baseline | admitted | suppressed`.
+  per-rule-version admission ledger, with the closed `admission` enum `baseline | admitted | suppressed | expired`.
   `activationId` names the point against which that rule version was judged. First activation and a new replacement
   version insert `baseline` only for their own `baselineIdentities`; a source worker inserts `admitted` or
-  `suppressed` only for the version whose D4 point it evaluates. A row belonging to one rule version can neither
+  `suppressed` only for the version whose D4 point it evaluates; and D4's stage expiry inserts `expired`, or changes an
+  `admitted` row whose projection has not committed to `expired`. That is the only permitted change to an admission
+  row, and `expired` is terminal and content-free. A row belonging to one rule version can neither
   satisfy nor conflict with one for another version. Projection, decision and delivery idempotency is therefore per
   `(rule version, occurrence)`, even though the content-free ingest identity for the raw occurrence is shared;
 - `decisions(id PRIMARY KEY, eventId, accountId, ruleId, ruleVersion, whatsappMessageId?, outcome, holdExpiresAt?, metadataExpiresAt, metadataState,
@@ -1679,7 +1712,8 @@ already crossed `disclosing`; it releases reservations, purges payloads and can 
 disable and re-enable protocol that advances this fence is D12.
 
 Decision metadata defaults to 90 days; ingest content, holds, delivery, SSE replay and dead-letter payload default to
-seven days; dry-run defaults to, and is capped at, 24 hours (D2). The person may shorten any retention through D2's
+seven days; dry-run defaults to, and is capped at, 24 hours (D2). A WhatsApp staged first representation has no
+retention of its own: it expires at D4's `stageExpiresAt`, the shortest ingest retention that applies to it. The person may shorten any retention through D2's
 whitelist; validation still enforces `hold <= ingest`. Raising one needs a new standing authorisation. Expiry workers use
 database time/deadlines, D7's decision-metadata purge transition and terminal payload transitions, not best-effort
 deletion jobs.
@@ -1930,7 +1964,8 @@ pending-completion intents (including any claimed rule replacement draining to P
 source positions), terminal failed activations and their audit code, Gmail metadata-read and Gmail/Resend lazy-
 materialisation retry age plus `vanished`/`unresolvable` counts and last resolutions, and source lag,
 leases, held decisions, dead letters, retention deadlines and missing secrets. It also reports each judge kind's
-enablement version or `disabled`, the Laya manifest id, runtime and model state, and, for each WhatsApp account,
+enablement version or `disabled`, the Laya manifest id, runtime-lock digest, runtime and model state and the network
+boundary in use (or why none applies), and, for each WhatsApp account,
 whether D9's live lists are applied and when.
 
 The `agentcomms-events` skill teaches an agent to propose and test a disabled rule, explain both untrusted
@@ -1942,7 +1977,7 @@ person. It never instructs the agent to type or request a secret.
 | Kind | Contract | Disclosure |
 |---|---|---|
 | `typesafe` | Jev through `POST https://api.typesafe.ai/v1/systemone`, using provider-native Noul output. It is **treated as hosted-only under currently published artefacts and terms**; this is not a claim that local Jev is impossible. | Exact approved input fields leave for the approved host. |
-| `laya` | Laya (§2), run on this machine's CPU by a supervised child process of the daemon, from a pinned, checksum-verified ONNX bundle that is downloaded only after the person enables the kind. Its Noul P(true) is interpreted exactly like Jev's (D5). After the download it uses no network. | Nothing leaves the machine: the exact approved input fields reach only the local worker. |
+| `laya` | Laya (§2), run on this machine's CPU by a supervised child process of the daemon, from a pinned, checksum-verified ONNX bundle that is downloaded only after the person enables the kind. Its Noul P(true) is interpreted exactly like Jev's (D5). After the download it uses no network, which the operating system enforces on macOS and Linux; it is not offered on Windows in version 1. | Nothing leaves the machine: the exact approved input fields reach only the local worker. |
 | `local-endpoint` | An approved `http` Ollama/System One endpoint or generic JSON-output model whose URL host is the literal `127.0.0.1` or `::1`; hostnames, HTTPS and non-loopback addresses are refused. Generic numbers are uncalibrated scores. The endpoint gets D7's per-connection resolution, address-set binding and redirect refusal; pending endpoints cannot be reached from MCP tests. | Only the explicitly approved literal loopback address; D7 taint still flushes before every call. |
 
 **Every judge kind is off until the person enables it.** A new database has no enablement pointer for any kind, and
@@ -1960,8 +1995,10 @@ enablement approval, whose preview lists the active rules that will call that ki
 can only shrink while the kind is off.
 
 `CanonicalJudgeKindDocument` is `{ id: "judge-kind:<kind>", version, kind }` plus, for `typesafe`,
-`endpoint: "https://api.typesafe.ai/v1/systemone"`, and, for `laya`, `manifest`: exactly the reviewed manifest entry
-below, with `files` sorted by raw UTF-8 path bytes. A `local-endpoint` enablement carries nothing more, because each of
+`endpoint: "https://api.typesafe.ai/v1/systemone"`, and, for `laya`, `manifest`, exactly the reviewed manifest entry
+below with `files` sorted by raw UTF-8 path bytes, plus `runtimeLock`: the runtime lock's sorted package list, each
+with name, version, tarball URL and `sha512` integrity, and the platform and SHA-256 digest of that platform's
+canonical file list (below). A `local-endpoint` enablement carries nothing more, because each of
 its judge versions binds its own URL and address set (D7).
 
 Every judge is immutable and versioned. No hosted or local judge may first acquire work until its kind is enabled and
@@ -1995,21 +2032,54 @@ gate's parity check against the Python reference and the narrow use—one `noul`
 call, where issues #10 and #11 do not apply—bound that. Moving to another runtime later, such as an npm release of
 `laya-ts`, is a new manifest entry and therefore a new enablement approval.
 
-*Where it runs: an isolated child process, not the daemon.* The daemon starts `process.execPath` on the runtime's
-worker entry with stdin and stdout pipes carrying length-prefixed JSON frames like D12's, an environment reduced to
-what Node needs (no `AGENT_COMMS_*`, token, proxy or `LAYA_*` variable and no `NODE_OPTIONS`), and no other inherited
-descriptor, database handle, secret store, provider session or control-protocol token. The reasons:
+*Where it runs: an isolated child process, not the daemon.* The daemon starts `process.execPath` on the worker entry
+that ships in its own package, inside the operating-system network boundary below, with stdin and stdout pipes
+carrying length-prefixed JSON frames like D12's, an environment reduced to what Node needs (no `AGENT_COMMS_*`,
+token, proxy or `LAYA_*` variable and no `NODE_OPTIONS`), and no other inherited descriptor, database handle, secret
+store, provider session or control-protocol token. The reasons for a separate process:
 `onnxruntime-node` is a native addon, and a crash or out-of-memory in it must not take down the process that owns the
 event database and outboxes; a native inference call cannot be cancelled from JavaScript, so D5's timeout is enforced
-by killing the worker; the roughly 2 GB the model occupies is returned when the worker exits; and the worker needs
-none of the daemon's authority. It is a fault and resource boundary, not a security boundary against a same-user
-process (§7, risk 2). The worker starts on the first call, exits after ten idle minutes, when the kind is disabled or
-when the daemon stops, and is started again after a crash. One worker answers one request at a time, so budget
-validation refuses a `laya` per-provider concurrency ceiling above 1.
+by killing the worker; the roughly 2 GB the model occupies is returned when the worker exits; the worker needs none
+of the daemon's authority; and only a separate process can be put inside a network boundary the daemon itself must
+not have. The process is a fault and resource boundary, not a security boundary against a same-user process (§7,
+risk 2). The worker starts on the first call, exits after ten idle minutes, when the kind is disabled or when the
+daemon stops, and is started again after a crash. One worker answers one request at a time, so budget validation
+refuses a `laya` per-provider concurrency ceiling above 1.
 
-Before loading, the worker re-hashes every bundle file against the manifest and refuses to start on any difference.
-It replaces `globalThis.fetch` with a function that throws before it imports the runtime, and imports no network
-module. Each request carries only the taint-flushed, enveloped judge input (D5, D7), the rule's question and the judge
+*No network: the operating system's boundary, not the worker's promise.* Once the model is downloaded, Laya uses no
+network, and that is enforced by the operating system around the worker, not by code inside it. What is enforced
+differs by platform, and every Laya preview, the Judges screen, `doctor` and `SECURITY.md` (D2) say exactly this:
+
+- **macOS:** the worker runs under `/usr/bin/sandbox-exec -p "(version 1) (allow default) (deny network*)"`. That
+  profile denies every network operation, including loopback and Unix-domain sockets, while leaving the stdin and
+  stdout pipes and file reads working; it was checked on macOS 14.5 (§2). Apple marks `sandbox-exec` deprecated in
+  favour of App Sandbox. It is still the boundary in version 1 because it is the one an unsigned build can apply. If
+  a macOS release removes it, or the self-test below finds that the profile no longer applies, Laya is not offered
+  on that machine; the replacement is a helper executable signed with the App Sandbox entitlement and without the
+  network-client entitlement, which belongs with D14's signing work and is D15 until then.
+- **Linux:** the worker runs in a new user and network namespace, through `unshare --user --map-current-user --net`
+  (util-linux; `--map-root-user` where an older `unshare` lacks `--map-current-user`) or, where that fails,
+  `bwrap --unshare-net` (bubblewrap). The namespace has no interface except an unconfigured loopback. Distribution
+  policy can forbid unprivileged user namespaces, as Ubuntu 23.10 and later can through AppArmor (§2), so the daemon
+  tries both at enablement and at every start; where neither works, the `laya` kind is not offered and the reason is
+  shown.
+- **Windows:** Laya is **not offered in version 1**. An AppContainer without the network capability would be a
+  boundary that an unprivileged process can apply (§2), but launching one needs a native Win32 launcher that Node's
+  `child_process` cannot replace and that this design does not include, and Node under an AppContainer is untested.
+  The Judges screen shows Laya as unavailable on Windows with that reason; the launcher is D15.
+
+The boundary is proved at every start, not assumed. The daemon opens a one-time loopback listener and starts the
+worker inside the boundary. The worker's first act, before it imports anything but Node built-ins and before any
+runtime or model file is opened, is to try a TCP connection to that listener and report the error it got. The daemon
+accepts the boundary only if that attempt failed, no connection reached its listener within the probe window, and,
+on Linux, the worker reports no network interface except loopback. Otherwise it kills the worker, records a
+content-free `boundary-failed` for `doctor` and the app, and does not send the load request: the worker never loads
+the runtime or the model outside a boundary that has passed. Inside the boundary the worker also replaces
+`globalThis.fetch` with a function that throws and imports no network module, and a test asserts that it opens no
+socket; those are defence in depth, not the boundary. The daemon's own downloads of the runtime and model happen
+before and outside the worker and are ordinary network traffic, bounded by the fetcher rules below.
+
+Each request carries only the taint-flushed, enveloped judge input (D5, D7), the rule's question and the judge
 version's prompt template. The worker counts the input's tokens with the bundle's own tokenizer and refuses an input
 that the 512-token context would truncate, rather than let the runtime truncate it silently; D5 records that refusal
 as malformed, so it is no-match. Template `laya-noul-v1` asks one `noul` question and reads its `noul` value; template
@@ -2058,23 +2128,45 @@ verbatim. The candidate entry below was checked on 2026-10-06 (§2); phase E2's 
 ```
 
 `originSha256` records which Convai weights the exporter says it converted; the gate's parity check is the evidence
-that the ONNX bundle computes the same function.
+that the ONNX bundle computes the same function. `runtime` names the lock's three direct packages for the preview;
+what binds and installs the runtime is the lock below, never those version strings.
+
+*The runtime lock.* The third-party runtime is installed from a lock that this repository's release produces and the
+daemon enforces from end to end; npm takes no part. The two ways to get there were (a) shipping a root lockfile and
+running a pinned npm with `npm ci --ignore-scripts`, or (b) shipping the exact tarball URLs with their integrity and
+having the daemon fetch, verify and extract them itself. This design takes **(b)**. Option (a) would still need an
+npm that the daemon must obtain and pin, would honour the person's own npm configuration (registry, proxy, cache and
+script settings), and would leave the extracted layout to npm until a check afterwards. Option (b) needs only Node
+and HTTPS, makes the lock the exact list of files that verification then checks, and lets the extractor skip
+`onnxruntime-node`'s binaries for other platforms. Its cost is a small, strict tar reader that this repository writes
+and tests.
+
+The lock, `laya-runtime.json`, ships inside `@agentcomms/events-daemon`, so it is exactly as trustworthy as the daemon
+code: npm provenance binds that package to this repository's commit and release run (§2). It lists the runtime's
+complete dependency closure as resolved by this repository's lockfile (19 packages for the candidate set, §2). For
+each package it gives the name, version, `https://registry.npmjs.org/` tarball URL and the registry's `sha512`
+integrity. For each platform that offers Laya (macOS and Linux on x64 and arm64) it lists every file to install: its
+path under `node_modules/`, size, SHA-256 and whether it is executable. The third-party set is declared in a private,
+unpublished workspace package, `packages/events-laya-runtime`, that holds no code. The release job builds the lock by
+fetching each tarball, checking its integrity and extracting it with the daemon's own extractor, and a repository
+test rebuilds the lock and must get byte-identical JSON. Only `onnxruntime-node` has an install script (§2), and
+nothing ever runs it.
 
 *Installation and download.* After the enablement's claim, and never before, the daemon:
 
-1. **Installs the runtime.** `@agentcomms/events-laya` is a separate library package of this repository's release.
-   It holds only the worker entry and pins the manifest's third-party versions exactly through a published
-   `npm-shrinkwrap.json`. The daemon installs it at its own release version into
-   `<dataDir>/events/laya/runtime/<version>/` the way core installs a managed runtime (§2), adding `--ignore-scripts`,
-   and then checks that the installed third-party versions equal the manifest's. Skipping scripts skips
-   `onnxruntime-node`'s linux/x64 NuGet download of CUDA providers this design never uses; the CPU binaries are
-   already in the package.
+1. **Installs the runtime from the lock.** It fetches each tarball from its exact URL under the fetcher rules in step
+   2, refuses one whose `sha512` differs, and extracts into `<dataDir>/events/laya/runtime/<lockDigest>.partial/`
+   only the entries the lock lists for this platform. The extractor accepts regular-file entries under the tarball's
+   `package/` root and nothing else: it refuses symbolic and hard links, devices, FIFOs, absolute paths, `..`
+   segments, backslashes, NUL bytes and duplicate entries, skips every unlisted entry, and writes owner-only files.
+   When every listed file is present with its size and SHA-256, one rename makes `<lockDigest>/`. No npm, npm cache,
+   `.npmrc`, registry setting or install script takes part.
 2. **Downloads the model.** A fixed-purpose fetcher in the daemon requests each file as
    `https://huggingface.co/<repo>/resolve/<revision>/<path>` with the full 40-hex revision, never a branch. It uses
    HTTPS only and follows at most five redirects, each to HTTPS. Every hop's resolved addresses must pass D7's IANA
    classification as globally reachable and must not be a metadata address; there is no approved address set,
    because a CDN's addresses are not stable and no event data is sent. It sends no cookie, `Authorization` header or
-   Hugging Face token, and a `User-Agent` naming only the product and version. Bytes stream into
+   token of any kind, and a `User-Agent` naming only the product and version. Bytes stream into
    `<dataDir>/events/laya/models/<manifestId>.partial/` and are hashed as they arrive. A file that grows past its
    manifest size is abandoned at once; a finished file whose size or SHA-256 differs is deleted and fetched again, at
    most five times, after which the model is `failed` with a stable code. After a restart, a partial file is resumed
@@ -2082,24 +2174,38 @@ that the ONNX bundle computes the same function.
    The download starts only if free space covers the remaining bytes plus ten per cent. When all five files verify,
    one rename makes `<manifestId>/` and `laya_models` records `ready`.
 
-The directories are owner-only, as D12's state files are. The download carries no event content and does not depend
-on the global event switch. Disabling the kind cancels a download and deletes its partial directory; verified files
-survive a disable, so re-enabling the same entry downloads nothing, and `judge model remove` deletes them. Once
-`ready`, Laya needs no network at all. A release that changes the manifest entry or any pinned third-party version
-leaves `laya` disabled, with its verified files kept, until the person approves the new entry; a release that changes
-only this repository's own code installs that release's `@agentcomms/events-laya` as part of the same release.
+*Verified before every start.* Immediately before it starts a worker, the daemon walks the runtime and model
+directories and compares them with this platform's file list in the lock and with the model manifest. The files
+present must be exactly those listed—none missing, none extra—and every size and SHA-256 must match. The worker is
+not started, so no native code is imported, until that check passes. On any mismatch the daemon deletes the failing
+directory, records a content-free `integrity` failure for `doctor` and the app, and reinstalls that directory once
+from its pinned sources; if the fresh copy fails too, `laya` stays `failed` until the person acts.
+
+The directories are owner-only, as D12's state files are. Downloads carry no event content and do not depend on the
+global event switch. Disabling the kind cancels a download and deletes its partial directory; verified directories
+survive a disable, so re-enabling the same entries downloads nothing, and `judge model remove` deletes them. Once the
+model is `ready`, Laya needs no network at all.
+
+*On update.* A `laya` enablement document binds the model manifest entry and the lock's package list with this
+platform's file-list digest. The worker's own code ships in the daemon package and is not in the lock, so a release
+that changes only this repository's code needs nothing new. When a new release's lock or model entry differs from the
+enabled one, the daemon's start-up applies the `laya` kind-disable tightening (D2, D5) with the audit reason
+`runtime-changed` or `model-changed`, keeps the verified directories, and waits for the person to approve the new
+entry; the new lock then installs into its own `<lockDigest>/`. A directory that no enabled version names is deleted
+once its replacement has verified, or by `judge model remove`. A downgrade follows the same rule.
 
 *Packaging and the app.* `@agentcomms/events-daemon` has no dependency on ONNX Runtime, `@receptron/laya` or the
-model, so a person who never enables Laya installs none of its roughly 300 MB of native binaries (§2).
-`@agentcomms/events-laya` lives in `packages/events-laya`, is published in lockstep with the other packages, declares
-`agentcommsPackage.kind: "library"` (D14) and is depended on by no package; in this repository pnpm's empty
-`allowBuilds` already keeps `onnxruntime-node`'s install script from running. The Tauri app contains no ONNX Runtime,
-worker, model or Node code and downloads nothing: as a client of the daemon (D12) it shows the enablement preview and
-approval, installation and download progress and the model's state. Its CSP, capabilities and installers are
+model, so a person who never enables Laya installs none of its roughly 300 MB of native binaries (§2). There is no
+published Laya package: the worker entry is part of the daemon, the third-party set is the private
+`packages/events-laya-runtime`, and in this repository pnpm's empty `allowBuilds` already keeps `onnxruntime-node`'s
+install script from running. The Tauri app contains no ONNX Runtime, worker, model or Node code and downloads
+nothing: as a client of the daemon (D12) it shows the enablement preview and approval, installation and download
+progress, the model's state and, on Windows, why Laya is unavailable. Its CSP, capabilities and installers are
 unchanged.
 
-*Stated limits.* Every Laya preview says: English checkpoint; 512-token context; CPU only; about 1.69 GB on disk,
-about 2 GB of memory while the worker runs, one call at a time; weights by Convai Innovations under Apache-2.0,
+*Stated limits.* Every Laya preview says: English checkpoint; 512-token context; CPU only; macOS and Linux only, with
+the network boundary that applies on this machine named; about 1.69 GB on disk, about 2 GB of memory while the worker
+runs, one call at a time; weights by Convai Innovations under Apache-2.0,
 converted to ONNX by a third party (receptron, MIT); accuracy in languages other than English is not established by
 this design. GPU execution providers and the multilingual checkpoint are D15.
 
@@ -2107,14 +2213,14 @@ this design. GPU execution providers and the multilingual checkpoint are D15.
 and each offered prompt template pass a labelled evaluation run on that release's code. The corpus is drawn from the
 owner's and colleagues' own Gmail and Slack messages under realistic rule questions and labelled by a person. It is
 kept outside the repository and never committed (`AGENTS.md`); only aggregate results are committed, as
-`packages/events-laya/gate/<manifestId>.json`, with each channel's item count, positive share and language mix. For
+`packages/events-laya-runtime/gate/<manifestId>.json`, with each channel's item count, positive share and language mix. For
 Gmail and for Slack separately, with at least 200 labelled pairs and at least 30% positives each, a template passes
 only if expected calibration error over ten equal-width bins is at most 0.10, Brier score at most 0.20 and AUROC at
 least 0.80, using the bundle's own temperatures. That is how D5's **probability** label is earned on this data rather
 than taken from the model card, which itself says its probabilities need checking on your own data. The gate also
 requires the worker's `p` to be within 0.001 of the Python reference `laya` at the weights' source revision on every
-corpus item, a warm p95 latency of at most 2 seconds and peak worker memory of at most 3 GB on an Apple-silicon Mac,
-Windows x64 and Linux x64, and a report of inputs refused for length and of results per language. A template that
+corpus item, a warm p95 latency of at most 2 seconds and peak worker memory of at most 3 GB inside the network
+boundary on an Apple-silicon Mac and on Linux x64, and a report of inputs refused for length and of results per language. A template that
 fails is not offered; if neither passes, the `laya` kind is not offered in that release. The gate decides when Laya
 ships, not whether it is designed.
 
@@ -2242,8 +2348,9 @@ replacement constraint in D8 is checked at prepare, claim and finalisation.
    row and encrypted first representation; the drain reads that staged representation alone and never a later
    snapshot or the live store, so an edit, deletion, media change, duplicate or disappearance after P neither changes
    nor loses what the old version delivers. Nothing here changes the new version's baseline. An `admitted` occurrence receives exactly that old version's
-   projection/delivery path even if the new version has already received its own `baseline` row. Completing that
-   old-version set records `drainedAt`. A key first seen at or before `baselineGeneration` that is absent from the
+   projection/delivery path even if the new version has already received its own `baseline` row. A key whose staged
+   representation reaches D4's `stageExpiresAt` first is resolved by its `expired` admission and delivers nothing.
+   Completing that old-version set records `drainedAt`. A key first seen at or before `baselineGeneration` that is absent from the
    baseline is not a substitute for an undrained row and is never projected for the new version after the swap. An ordered new-only scope either started at P or advances its
    shared cursor to P without a replacement-version projection; a WhatsApp new-only scope follows D4. For a Slack
    conversation, reaching P in
@@ -2373,8 +2480,9 @@ no recursive delivery case.
    dry-run rows, degraded reset barriers with `target resume`, and held decisions.
 6. **Judges** — the three judge kinds, each shown off until enabled here: enable opens the D2 approval flow with
    D11's preview, and disable applies immediately. Then exact inputs, the hosted warning, human-only keys, local
-   endpoints and, for Laya, its stated limits, licences, runtime installation and download progress, verified state
-   and remove-files action. Key entry/rotation opens `secrets`.
+   endpoints and, for Laya, its stated limits, licences, the network boundary that applies on this machine (or, on
+   Windows and wherever no boundary can be applied, why Laya is unavailable), runtime installation and download
+   progress, verified state and remove-files action. Key entry/rotation opens `secrets`.
 7. **Approvals** — complete standing-authorisation preview and typed challenge.
 8. **Settings** — autostart, keep collecting after quit, event secret backend/migration, retention, data location
    (including the Laya model's disk use), and about, which states that version 1 is unsigned (D14).
@@ -2444,8 +2552,9 @@ apps/
 packages/
   core/                   # gains D9's approval/audit/taint support; no event configuration or event-secret migration
   events/                 # NEW @agentcomms/events — isomorphic catalogue, pinned Unicode, conditions, mapping
-  events-daemon/          # NEW @agentcomms/events-daemon — I/O, ingest, approval, delivery, CLI, MCP, Laya manifest
-  events-laya/            # NEW @agentcomms/events-laya — Node-only Laya worker; installed only on enablement (D11)
+  events-daemon/          # NEW @agentcomms/events-daemon — I/O, ingest, approval, delivery, CLI, MCP, Laya worker,
+                          #   model manifest and runtime lock
+  events-laya-runtime/    # NEW private, unpublished, no code — declares the Laya runtime's third-party set (D11)
   gmail/ slack/ resend/ whatsapp/  # each gains operations/events.ts and manifest events
 ```
 
@@ -2475,10 +2584,11 @@ exported factory; `operations` is the package-relative directory whose exported 
 name. A service follows the Commander conventions `src/cli.ts`, `src/cli/program.ts` and exported `run`; changing
 those conventions requires new manifest fields rather than a package-name special case.
 
-`@agentcomms/events` and `@agentcomms/events-laya` are libraries and `@agentcomms/events-daemon` the service.
-`@agentcomms/events-laya` is Node-only, carries the native `onnxruntime-node` through its pinned dependencies and is
-depended on by no package: the daemon installs it as a managed runtime only when the person enables Laya (D11), and
-its import test runs in this repository, where pnpm runs no dependency install script. The existing registry begins channel
+`@agentcomms/events` is the library and `@agentcomms/events-daemon` the service. `packages/events-laya-runtime` is
+private and never published: it only declares the Laya runtime's third-party packages, so that this repository's
+lockfile pins them and the release can build D11's runtime lock from it. No published package depends on those
+packages; the daemon installs them itself from the lock only when the person enables Laya (D11), and in this
+repository pnpm runs no dependency install script. The existing registry begins channel
 discovery in `readChannels` and derives `SURFACES`/`DRIVERS` in `loadRegistry`
 (`scripts/channels.mjs:35,129`). It is extended to read strict `agentcommsPackage` declarations in the same package
 walk and produce `libraries` and `services` beside `channels`. Libraries feed publication and dependency ordering but
@@ -2564,7 +2674,10 @@ part: without a signing configuration it publishes only prereleases and refuses 
 - **Other local judge models:** D11 specifies one, Laya's English checkpoint on the CPU. Laya's multilingual
   checkpoint, GPU execution providers, another runtime and any other local model each need their own manifest entry,
   licence check, pinned checksummed source, isolation review and pass of D11's labelled Gmail/Slack gate, and no
-  model is ever put inside an installer.
+  model is ever put inside an installer. Two network boundaries are also future work: a Windows launcher that starts
+  the worker in an AppContainer without the network capability, after a spike proves Node runs there, which would let
+  Windows offer Laya; and a helper signed with the macOS App Sandbox entitlement and no network-client entitlement,
+  which replaces `sandbox-exec` if Apple removes it and belongs with D14's signing work.
 - **OS service:** a future design must cover per-platform identity, owner-only state, autostart/update recovery and the
   human-only installation credentials or privileges each operating system requires.
 
@@ -2581,7 +2694,7 @@ Each phase is specified, reviewed, planned and built separately. The order is by
 | C | Desktop app in `apps/desktop` of this repository, joining the pnpm workspace, and tray lifecycle, separate privileged `secrets` window, per-window capabilities, production no-egress CSP/navigation policy, Rust approval/secret surfaces, supervision and protocol compatibility; the unsigned version-1 `desktop-v*` prerelease workflow, its first-launch documentation and the signing gate for any wider release | B3 |
 | D | Slack, Resend and WhatsApp sources, including resumable Slack pagination and aggregate top-level/reply drain barriers, Resend required-detail terminal resolution and Unicode-code-point normalisation, and WhatsApp event-owned raw-key generation diffs using the protocol message key, never `Z_PK` or an index-derived sender, with first representations staged before the checked copy is disposed and D9's recoverable list-change protocol and live-list checks on every WhatsApp dry-run read and SSE frame; each ships with per-source taint and reset/fairness tests | B1 |
 | E | Judge-kind enablement with every kind off until enabled, hosted Jev and `local-endpoint` judges, holds, rolling durable budgets with crash-settled reservations, adversarial corpus; refuses to build or ship unless B3's secret-completion and human-only capability surfaces are present | B3 (C for app hold resolution and the Judges screen) |
-| E2 | The `laya` judge kind: the reviewed manifest, `@agentcomms/events-laya` with its pinned shrinkwrapped runtime, managed installation with scripts ignored, the verified, resumable model download, the isolated worker and its fences; ships in a release only when D11's labelled Gmail/Slack quality gate passes for that manifest entry and template | E (C for the app's enablement and progress screens) |
+| E2 | The `laya` judge kind on macOS and Linux: the reviewed model manifest, the private `packages/events-laya-runtime` and the release-built runtime lock, the daemon's own verified tarball fetch and strict extraction, the verified, resumable model download, whole-tree verification before every start, the update rule, the operating-system network boundary with its start-up self-test, the isolated worker and its fences; ships in a release only when D11's labelled Gmail/Slack quality gate passes for that manifest entry and template | E (C for the app's enablement and progress screens) |
 | F | Reserved for the five separate future designs in D15; this specification supplies no implementation or acceptance contract for them | D, E, E2 |
 
 No phase before B2 can make network disclosures. No new source ships without taint-before-disclosure. No judge of
@@ -2645,15 +2758,29 @@ any kind is callable before E, and none afterwards until the person enables its 
   their reservations, discards a late result, needs no approval, and leaves rule and judge versions unrevoked; a new
   enablement then restores exactly the listed rules. A `typesafe` enablement alone makes no request to TypeSafe. For
   `laya`, with an injected registry and a loopback fake of Hugging Face and its CDN: nothing is installed or fetched
-  before the claim; the runtime install passes `--ignore-scripts` and refuses third-party versions that differ from
-  the manifest; every request names the full revision and carries no cookie, `Authorization` or token; a redirect to
+  before the claim; the runtime install fetches only the lock's URLs and refuses a tarball whose `sha512` differs;
+  the extractor refuses symbolic and hard links, devices, FIFOs, absolute paths, `..`, backslashes, NUL bytes and
+  duplicate entries, skips unlisted entries, and never runs npm or an install script; every request names the full
+  revision and carries no cookie, `Authorization` or token; a redirect to
   HTTP, a sixth redirect and a hop resolving to a private, link-local or metadata address are refused; an oversized
   file is abandoned at once; a size or SHA-256 mismatch is deleted, retried and after five failures is `failed`; a
   restart resumes by `Range` after re-hashing, and restarts the file when the range is ignored; insufficient space
   refuses to start; disabling mid-download deletes the partial directory; and only the final rename makes `ready`.
-  The worker refuses to load a tampered file, inherits no `AGENT_COMMS_*`, token, proxy, `LAYA_*` or `NODE_OPTIONS`
-  variable or extra descriptor, and opens no socket during load or calls; the package's own downloader is never
-  reached. A worker crash and a 30-second hang each yield no-match with the worker killed and later restarted; an
+  Before every start, a runtime or model tree with a missing, extra, resized or altered file—or an altered file
+  injected after a verified start—stops the worker from starting, deletes that tree, reinstalls it once, and leaves
+  `laya` `failed` if the reinstall fails too; no native code is imported before the check passes. A repository test
+  rebuilds the runtime lock from the lockfile and tarballs and gets byte-identical JSON. On update, a release whose
+  lock or model entry differs applies the `laya` kind-disable at start-up with `runtime-changed` or `model-changed`
+  and keeps the verified directories, a release that changes only this repository's code changes nothing, and a
+  downgrade behaves the same way. The worker inherits no `AGENT_COMMS_*`, token, proxy, `LAYA_*` or `NODE_OPTIONS`
+  variable or extra descriptor; the package's own downloader is never reached. The network boundary is tested on each
+  platform: on macOS the worker runs under the `deny network*` profile and a TCP, `fetch`, UDP and Unix-domain
+  attempt each fails while its pipes work; on Linux it runs in a new network namespace through `unshare` and,
+  separately, through `bwrap`, and sees only loopback; with `sandbox-exec` absent, with both Linux tools absent and
+  with user namespaces forbidden, `laya` is not offered and the reason is shown; a stand-in boundary that lets the
+  self-test connect makes the daemon kill the worker, record `boundary-failed` and never send the load request; and on
+  Windows the kind is not offered and the Judges screen gives the reason. The in-worker `fetch` replacement and the
+  no-socket assertion still run, as defence in depth. A worker crash and a 30-second hang each yield no-match with the worker killed and later restarted; an
   input the tokenizer would truncate is refused as malformed; wrong-typed, non-finite or out-of-range output is
   malformed; a `laya` concurrency ceiling above 1 is refused; and the worker exits after ten idle minutes. Fast tests
   use an injected stand-in for `@receptron/laya`; the real bundle runs only in the E2 gate job, never in
@@ -2969,6 +3096,17 @@ any kind is callable before E, and none afterwards until the person enables its 
   staged representation is purged exactly when its last owed version has admitted and projected it, or earlier by a
   revocation, `disable-all` or a visibility purge.
 
+  Stage expiry has its own owed tests. With two owed rule versions whose ingest retentions differ, the staged
+  representation's `stageExpiresAt` is the staging time plus the shorter one and never moves. Injected time one tick
+  before, exactly at and after that deadline covers three cases: expiry before any admission (both versions get
+  `expired`, the stage is purged, and nothing is ever projected or delivered); expiry after an `admitted` row but
+  before its projection commits (that row becomes `expired` and no projection appears); and expiry after one version
+  has projected, which purges the stage and leaves that version's projection to its own ingest deadline while the
+  other gets `expired`. Each runs across a restart before, during and after the expiry transaction, including a
+  daemon stopped past the deadline, whose start-up purges before any source or worker runs. A replacement drain whose
+  owed key expires completes with that key `expired`. Scans of the database, WAL and free pages after expiry find no
+  payload, and the expiry leaves only the content-free admissions and `doctor` count.
+
   The list-change crash matrix closes round 19's second item. WhatsApp items for one tuple are staged, projected,
   held, queued, retryable, `disclosing` but not yet across the boundary, dead-lettered, in `dryrun_log` and in
   `stream_log`; then a `deny` and, separately, an allowlist narrowing hide that tuple through the real
@@ -3017,8 +3155,8 @@ any kind is callable before E, and none afterwards until the person enables its 
   publish in dependency order; an otherwise unknown fixture service appears automatically in publication,
   `SURFACES`, `DRIVERS`, generated CLI/MCP references and executed parity, while an explicit library is the only
   surface-free published kind. Browser import has no `node:` edge; root verify runs the TypeScript desktop/vector
-  side. `@agentcomms/events-laya` publishes as a library in lockstep with its `npm-shrinkwrap.json`, no published
-  package depends on it, and the resolved dependency tree of `@agentcomms/events-daemon` contains no
+  side. `packages/events-laya-runtime` is private and absent from publication, the published daemon package carries
+  `laya-runtime.json`, and the resolved dependency tree of `@agentcomms/events-daemon` contains no
   `onnxruntime-node` or `@receptron/laya`. Judge-kind operations have CLI and MCP rows; `judge kind enable` from MCP
   only prepares. A phase-E gate deliberately removes or stubs B3 secret completion and human-only operations and proves judges
   then refuse to build or ship.
@@ -3067,9 +3205,10 @@ are in scope only through the approved
    anyway**, cannot run version 1. None of this weakens the daemon's safety gates.
 8. **A local model is large, young and someone else's.** Laya's runtime is a third party's 0.1.2, its ONNX bundle is
    a third party's export, and its own card says the probabilities need checking on your own data. It costs about
-   1.69 GB of disk and 2 GB of memory and covers English only. It is off until the person enables it, every byte and
-   version is pinned and verified, it runs in an isolated worker with no network, and it ships only when D11's
-   labelled gate passes.
+   1.69 GB of disk and 2 GB of memory and covers English only. It is off until the person enables it; every runtime
+   and model file is pinned in a lock or manifest and verified before every start; it runs in an isolated worker whose
+   lack of network is enforced by the operating system on macOS and Linux, through a macOS tool Apple calls
+   deprecated; it is not offered on Windows in version 1; and it ships only when D11's labelled gate passes.
 
 ## 8. Owner decisions (2026-10-06)
 
@@ -3080,7 +3219,8 @@ applies; this list says what was decided and where it landed.
    into this build, optionally. Landed as the `laya` judge kind: facts and sources in §2; D11 (kind, runtime,
    isolated worker, manifest, installation and download, packaging, limits, quality gate); D2 (judge-kind enablement
    document and digest vectors); D5 (probability label); D8 (`laya_models`); D10 (`judge kind` and `judge model`
-   operations); D13 (Judges screen); D14 (`packages/events-laya`); D15 (narrowed to other local models); §4 phase E2;
+   operations); D13 (Judges screen); D14 (`packages/events-laya-runtime`); D15 (narrowed to other local models);
+   D2's `SECURITY.md` text (round 20); §4 phase E2;
    §5 "Judge kinds and Laya"; §7 risk 8.
 2. **"Values as they are" means clean typed values**: typed, sanitised source values with no transforms, never the
    provider's raw bytes. Landed in D6 (what a `$path` leaf delivers), D3 (prose representation) and Appendix A.1.
@@ -3104,10 +3244,10 @@ applies; this list says what was decided and where it landed.
    default now equals its cap, and equal hold and ingest defaults satisfy `hold ≤ ingest`. The one consequence worth
    naming is that content now stays at rest up to seven days by default rather than 24 hours (§7, risk 4).
 
-## 9. Round-19 review items (closed 2026-10-06)
+## 9. Review items closed on 2026-10-06 (rounds 19 and 20)
 
 Both findings from review round 19 are closed in the design, following the direction recorded when the review was
-paused; round 20 reviews the closures.
+paused; round 20 confirmed both closures.
 
 1. **Closed: an unstaged WhatsApp key in a replacement baseline had no durable payload for the old version's drain.**
    Sampling a replacement's WhatsApp point is now one complete checked pass that commits its generation through D4's
@@ -3125,6 +3265,24 @@ paused; round 20 reviews the closures.
    (`whatsapp_visibility`, `whatsappMessageId`, append/read fences), D2 (start-up recovery, boundary fence), D4, D7
    (dry-run and SSE rows), D10 and D13 (applied state), D12 (finalisation), §4 phase D, and §5's list-change crash
    matrix.
+
+Round 20 found three further items in the 2026-10-06 revision; each is closed:
+
+3. **Closed: WhatsApp first-representation staging had no approved retention deadline.** Every staged first
+   representation now has a fixed `stageExpiresAt` at the shortest ingest retention among the versions that may be
+   owed it, and expiry purges it and writes content-free terminal `expired` admissions. Landed in D4, D8
+   (`whatsapp_occurrences.stageExpiresAt`, the `expired` admission, the retention paragraph), D12 (drain) and §5's
+   stage-expiry tests.
+4. **Closed: the Laya native runtime was not durably integrity-pinned.** The daemon now installs the runtime itself
+   from a release-built lock of exact tarball URLs and `sha512` integrity shipped inside its own package, extracts
+   only the lock's listed files, and verifies the complete runtime and model trees before every worker start; npm
+   takes no part. Landed in D11 (runtime lock, installation, verification, update), D2 (enablement document and
+   vectors), D14, §4 phase E2, §5 and §2.
+5. **Closed: replacing `fetch` did not enforce "no network".** The worker now runs inside an operating-system
+   boundary—a `sandbox-exec` profile denying all network on macOS, a new network namespace on Linux—that must pass a
+   start-up self-test before the runtime or model loads; Laya is not offered on Windows in version 1, and the `fetch`
+   replacement remains only as defence in depth. Landed in D11, D2's `SECURITY.md` text, D13, D15, §7 risk 8, §5 and
+   §2.
 
 ## Appendix A. Version-1 event catalogue (normative)
 
