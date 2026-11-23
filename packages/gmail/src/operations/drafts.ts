@@ -527,7 +527,6 @@ async function draftReplyTo(
   const mode = oneOf(input.mode, REPLY_MODES, 'a reply mode') ?? 'reply';
   // A forward is one operation whichever tool asked for it, so `mode: forward` keeps the original's attachments too.
   if (mode === 'forward') {
-    if (input.quote === false) throw noQuoteForward();
     // A forward answers no message, so its line ties to none.
     return { draft: await makeForward(context, alias, { ...input, messageId }), replyTo: undefined };
   }
